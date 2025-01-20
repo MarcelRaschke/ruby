@@ -106,7 +106,7 @@ describe :yaml_load_unsafe, shared: true do
                                                     Date.new( 2001, 8, 12 ),
                                                     Date.new( 2001, 8, 14 ) ]
     }
-    YAML.send(@method, $complex_key_1).should == expected
+    YAML.send(@method, YAMLSpecs::COMPLEX_KEY_1).should == expected
   end
 
   describe "with iso8601 timestamp" do
@@ -123,7 +123,11 @@ describe :yaml_load_unsafe, shared: true do
   end
 
   it "loads an OpenStruct" do
-    require "ostruct"
+    begin
+      require "ostruct"
+    rescue LoadError
+      skip "OpenStruct is not available"
+    end
     os = OpenStruct.new("age" => 20, "name" => "John")
     loaded = YAML.send(@method, "--- !ruby/object:OpenStruct\ntable:\n  :age: 20\n  :name: John\n")
     loaded.should == os

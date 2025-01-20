@@ -58,6 +58,7 @@ class TestGemConfigFile < Gem::TestCase
       fp.puts ":ssl_verify_mode: 0"
       fp.puts ":ssl_ca_cert: /etc/ssl/certs"
       fp.puts ":cert_expiration_length_days: 28"
+      fp.puts ":install_extension_in_lib: true"
       fp.puts ":ipv4_fallback_enabled: true"
     end
 
@@ -73,6 +74,7 @@ class TestGemConfigFile < Gem::TestCase
     assert_equal 0, @cfg.ssl_verify_mode
     assert_equal "/etc/ssl/certs", @cfg.ssl_ca_cert
     assert_equal 28, @cfg.cert_expiration_length_days
+    assert_equal true, @cfg.install_extension_in_lib
     assert_equal true, @cfg.ipv4_fallback_enabled
   end
 
@@ -485,6 +487,16 @@ if you believe they were disclosed to a third party.
     end
   end
 
+  def test_accept_string_key
+    File.open @temp_conf, "w" do |fp|
+      fp.puts "verbose: false"
+    end
+
+    util_config_file
+
+    assert_equal false, @cfg.verbose
+  end
+
   def test_load_ssl_verify_mode_from_config
     File.open @temp_conf, "w" do |fp|
       fp.puts ":ssl_verify_mode: 1"
@@ -509,8 +521,12 @@ if you believe they were disclosed to a third party.
     assert_equal("/home/me/mine.pem", @cfg.ssl_client_cert)
   end
 
-  def util_config_file(args = @cfg_args)
-    @cfg = Gem::ConfigFile.new args
+  def test_load_install_extension_in_lib_from_config
+    File.open @temp_conf, "w" do |fp|
+      fp.puts ":install_extension_in_lib: false"
+    end
+    util_config_file
+    assert_equal(false, @cfg.install_extension_in_lib)
   end
 
   def test_disable_default_gem_server
@@ -547,5 +563,90 @@ if you believe they were disclosed to a third party.
     actual = Gem::ConfigFile.dump_with_rubygems_yaml(symbol_key_hash)
 
     assert_equal("---\n:foo: \"bar\"\n", actual)
+  end
+
+  def test_handle_comment
+    yaml = <<~YAML
+      ---
+      :foo: bar # buzz
+      #:notkey: bar
+    YAML
+
+    actual = Gem::ConfigFile.load_with_rubygems_config_hash(yaml)
+    assert_equal("bar", actual[:foo])
+    assert_equal(false, actual.key?("#:notkey"))
+    assert_equal(false, actual.key?(:notkey))
+    assert_equal(1, actual.size)
+  end
+
+  def test_s3_source
+    yaml = <<~YAML
+      ---
+      :sources:
+      - s3://bucket1/
+      - s3://bucket2/
+      - s3://bucket3/path_to_gems_dir/
+      - s3://bucket4/
+      - https://rubygems.org/
+      :s3_source:
+        :bucket1:
+          :provider: env
+        :bucket2:
+          :provider: instance_profile
+          :region: us-west-2
+        :bucket3:
+          :id: AOUEAOEU123123AOEUAO
+          :secret: aodnuhtdao/saeuhto+19283oaehu/asoeu+123h
+          :region: us-east-2
+        :bucket4:
+          :id: AOUEAOEU123123AOEUAO
+          :secret: aodnuhtdao/saeuhto+19283oaehu/asoeu+123h
+          :security_token: AQoDYXdzEJr
+          :region: us-west-1
+    YAML
+
+    File.open @temp_conf, "w" do |fp|
+      fp.puts yaml
+    end
+    util_config_file
+
+    assert_equal(["s3://bucket1/", "s3://bucket2/", "s3://bucket3/path_to_gems_dir/", "s3://bucket4/", "https://rubygems.org/"], @cfg.sources)
+    expected_config = {
+      bucket1: { provider: "env" },
+      bucket2: { provider: "instance_profile", region: "us-west-2" },
+      bucket3: { id: "AOUEAOEU123123AOEUAO", secret: "aodnuhtdao/saeuhto+19283oaehu/asoeu+123h", region: "us-east-2" },
+      bucket4: { id: "AOUEAOEU123123AOEUAO", secret: "aodnuhtdao/saeuhto+19283oaehu/asoeu+123h", security_token: "AQoDYXdzEJr", region: "us-west-1" },
+    }
+    assert_equal(expected_config, @cfg[:s3_source])
+    assert_equal(expected_config[:bucket1], @cfg[:s3_source][:bucket1])
+    assert_equal(expected_config[:bucket2], @cfg[:s3_source][:bucket2])
+    assert_equal(expected_config[:bucket3], @cfg[:s3_source][:bucket3])
+    assert_equal(expected_config[:bucket4], @cfg[:s3_source][:bucket4])
+  end
+
+  def test_s3_source_with_config_without_lookahead
+    yaml = <<~YAML
+    :sources:
+    - s3://bucket1/
+    s3_source:
+      bucket1:
+        provider: env
+    YAML
+
+    File.open @temp_conf, "w" do |fp|
+      fp.puts yaml
+    end
+    util_config_file
+
+    assert_equal(["s3://bucket1/"], @cfg.sources)
+    expected_config = {
+      "bucket1" => { "provider" => "env" },
+    }
+    assert_equal(expected_config, @cfg[:s3_source])
+    assert_equal(expected_config[:bucket1], @cfg[:s3_source][:bucket1])
+  end
+
+  def util_config_file(args = @cfg_args)
+    @cfg = Gem::ConfigFile.new args
   end
 end

@@ -6,30 +6,30 @@ class TestGemResolverAPISet < Gem::TestCase
   def setup
     super
 
-    @dep_uri = URI "#{@gem_repo}info/"
+    @dep_uri = Gem::URI "#{@gem_repo}info/"
   end
 
   def test_initialize
     set = Gem::Resolver::APISet.new
 
-    assert_equal URI("https://index.rubygems.org/info/"),            set.dep_uri
-    assert_equal URI("https://index.rubygems.org/"),                 set.uri
-    assert_equal Gem::Source.new(URI("https://index.rubygems.org")), set.source
+    assert_equal Gem::URI("https://index.rubygems.org/info/"),            set.dep_uri
+    assert_equal Gem::URI("https://index.rubygems.org/"),                 set.uri
+    assert_equal Gem::Source.new(Gem::URI("https://index.rubygems.org")), set.source
   end
 
   def test_initialize_deeper_uri
     set = Gem::Resolver::APISet.new "https://rubygemsserver.com/mygems/info"
 
-    assert_equal URI("https://rubygemsserver.com/mygems/info"),       set.dep_uri
-    assert_equal URI("https://rubygemsserver.com/"),                  set.uri
-    assert_equal Gem::Source.new(URI("https://rubygemsserver.com/")), set.source
+    assert_equal Gem::URI("https://rubygemsserver.com/mygems/info"),       set.dep_uri
+    assert_equal Gem::URI("https://rubygemsserver.com/"),                  set.uri
+    assert_equal Gem::Source.new(Gem::URI("https://rubygemsserver.com/")), set.source
   end
 
   def test_initialize_uri
     set = Gem::Resolver::APISet.new @dep_uri
 
-    assert_equal URI("#{@gem_repo}info/"), set.dep_uri
-    assert_equal URI(@gem_repo.to_s), set.uri
+    assert_equal Gem::URI("#{@gem_repo}info/"), set.dep_uri
+    assert_equal Gem::URI(@gem_repo.to_s), set.uri
   end
 
   def test_find_all
@@ -124,6 +124,25 @@ class TestGemResolverAPISet < Gem::TestCase
     spec_fetcher
 
     @fetcher.data["#{@dep_uri}a"] = "---"
+
+    set = Gem::Resolver::APISet.new @dep_uri
+
+    a_dep = Gem::Resolver::DependencyRequest.new dep("a"), nil
+
+    assert_empty set.find_all(a_dep)
+
+    @fetcher.data.delete "#{@dep_uri}a"
+
+    assert_empty set.find_all(a_dep)
+  end
+
+  def test_find_all_not_found
+    spec_fetcher
+
+    @fetcher.data["#{@dep_uri}/a"] =
+      proc do
+        raise Gem::RemoteFetcher::FetchError
+      end
 
     set = Gem::Resolver::APISet.new @dep_uri
 

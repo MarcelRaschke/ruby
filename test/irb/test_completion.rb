@@ -14,6 +14,19 @@ module TestIRB
       IRB::RegexpCompletor.new.doc_namespace('', target, '', bind: bind)
     end
 
+    class CommandCompletionTest < CompletionTest
+      def test_command_completion
+        completor = IRB::RegexpCompletor.new
+        binding.eval("some_var = 1")
+        # completion for help command's argument should only include command names
+        assert_include(completor.completion_candidates('help ', 's', '', bind: binding), 'show_source')
+        assert_not_include(completor.completion_candidates('help ', 's', '', bind: binding), 'some_var')
+
+        assert_include(completor.completion_candidates('', 'show_s', '', bind: binding), 'show_source')
+        assert_not_include(completor.completion_candidates(';', 'show_s', '', bind: binding), 'show_source')
+      end
+    end
+
     class MethodCompletionTest < CompletionTest
       def test_complete_string
         assert_include(completion_candidates("'foo'.up", binding), "'foo'.upcase")
@@ -124,8 +137,9 @@ module TestIRB
       end
 
       def test_complete_require_library_name_first
-        candidates = IRB::RegexpCompletor.new.completion_candidates("require ", "'csv", "", bind: binding)
-        assert_equal "'csv", candidates.first
+        # Test that library name is completed first with subdirectories
+        candidates = IRB::RegexpCompletor.new.completion_candidates("require ", "'irb", "", bind: binding)
+        assert_equal "'irb", candidates.first
       end
 
       def test_complete_require_relative

@@ -1,4 +1,4 @@
-# frozen_string_literal: false
+# frozen_string_literal: true
 #
 #   irb/context.rb - irb context
 #   	by Keiju ISHITSUKA(keiju@ruby-lang.org)
@@ -13,6 +13,10 @@ module IRB
   # A class that wraps the current state of the irb session, including the
   # configuration of IRB.conf.
   class Context
+    KERNEL_PUBLIC_METHOD = ::Kernel.instance_method(:public_method)
+    KERNEL_METHOD = ::Kernel.instance_method(:method)
+
+    ASSIGN_OPERATORS_REGEXP = Regexp.union(%w[= += -= *= /= %= **= &= |= &&= ||= ^= <<= >>=])
     # Creates a new IRB context.
     #
     # The optional +input_method+ argument:
@@ -22,10 +26,11 @@ module IRB
     # +other+::   uses this as InputMethod
     def initialize(irb, workspace = nil, input_method = nil)
       @irb = irb
+      @workspace_stack = []
       if workspace
-        @workspace = workspace
+        @workspace_stack << workspace
       else
-        @workspace = WorkSpace.new
+        @workspace_stack << WorkSpace.new
       end
       @thread = Thread.current
 
@@ -61,7 +66,7 @@ module IRB
       @io = nil
 
       self.inspect_mode = IRB.conf[:INSPECT_MODE]
-      self.use_tracer = IRB.conf[:USE_TRACER] if IRB.conf[:USE_TRACER]
+      self.use_tracer = IRB.conf[:USE_TRACER]
       self.use_loader = IRB.conf[:USE_LOADER] if IRB.conf[:USE_LOADER]
       self.eval_history = IRB.conf[:EVAL_HISTORY] if IRB.conf[:EVAL_HISTORY]
 
@@ -72,19 +77,20 @@ module IRB
 
       self.prompt_mode = IRB.conf[:PROMPT_MODE]
 
-      if IRB.conf[:SINGLE_IRB] or !defined?(IRB::JobManager)
-        @irb_name = IRB.conf[:IRB_NAME]
-      else
-        @irb_name = IRB.conf[:IRB_NAME]+"#"+IRB.JobManager.n_jobs.to_s
+      @irb_name = IRB.conf[:IRB_NAME]
+
+      unless IRB.conf[:SINGLE_IRB] or !defined?(IRB::JobManager)
+        @irb_name = @irb_name + "#" + IRB.JobManager.n_jobs.to_s
       end
-      @irb_path = "(" + @irb_name + ")"
+
+      self.irb_path = "(" + @irb_name + ")"
 
       case input_method
       when nil
         @io = nil
         case use_multiline?
         when nil
-          if STDIN.tty? && IRB.conf[:PROMPT_MODE] != :INF_RUBY && !use_singleline?
+          if term_interactive? && IRB.conf[:PROMPT_MODE] != :INF_RUBY && !use_singleline?
             # Both of multiline mode and singleline mode aren't specified.
             @io = RelineInputMethod.new(build_completor)
           else
@@ -98,7 +104,7 @@ module IRB
         unless @io
           case use_singleline?
           when nil
-            if (defined?(ReadlineInputMethod) && STDIN.tty? &&
+            if (defined?(ReadlineInputMethod) && term_interactive? &&
                 IRB.conf[:PROMPT_MODE] != :INF_RUBY)
               @io = ReadlineInputMethod.new
             else
@@ -121,11 +127,11 @@ module IRB
       when '-'
         @io = FileInputMethod.new($stdin)
         @irb_name = '-'
-        @irb_path = '-'
+        self.irb_path = '-'
       when String
         @io = FileInputMethod.new(input_method)
         @irb_name = File.basename(input_method)
-        @irb_path = input_method
+        self.irb_path = input_method
       else
         @io = input_method
       end
@@ -146,52 +152,24 @@ module IRB
         @newline_before_multiline_output = true
       end
 
-      @user_aliases = IRB.conf[:COMMAND_ALIASES].dup
-      @command_aliases = @user_aliases.merge(KEYWORD_ALIASES)
+      @command_aliases = IRB.conf[:COMMAND_ALIASES].dup
     end
 
-    # because all input will eventually be evaluated as Ruby code,
-    # command names that conflict with Ruby keywords need special workaround
-    # we can remove them once we implemented a better command system for IRB
-    KEYWORD_ALIASES = {
-      :break => :irb_break,
-      :catch => :irb_catch,
-      :next => :irb_next,
-    }.freeze
-
-    private_constant :KEYWORD_ALIASES
-
-    private def build_completor
-      completor_type = IRB.conf[:COMPLETOR]
-      case completor_type
-      when :regexp
-        return RegexpCompletor.new
-      when :type
-        completor = build_type_completor
-        return completor if completor
-      else
-        warn "Invalid value for IRB.conf[:COMPLETOR]: #{completor_type}"
-      end
-      # Fallback to RegexpCompletor
-      RegexpCompletor.new
+    def use_tracer=(val)
+      require_relative "ext/tracer" if val
+      IRB.conf[:USE_TRACER] = val
     end
 
-    private def build_type_completor
-      if RUBY_ENGINE == 'truffleruby'
-        # Avoid SynatxError. truffleruby does not support endless method definition yet.
-        warn 'TypeCompletor is not supported on TruffleRuby yet'
-        return
-      end
+    def eval_history=(val)
+      self.class.remove_method(__method__)
+      require_relative "ext/eval_history"
+      __send__(__method__, val)
+    end
 
-      begin
-        require 'repl_type_completor'
-      rescue LoadError => e
-        warn "TypeCompletor requires `gem repl_type_completor`: #{e.message}"
-        return
-      end
-
-      ReplTypeCompletor.preload_rbs
-      TypeCompletor.new(self)
+    def use_loader=(val)
+      self.class.remove_method(__method__)
+      require_relative "ext/use-loader"
+      __send__(__method__, val)
     end
 
     def save_history=(val)
@@ -212,15 +190,24 @@ module IRB
       IRB.conf[:HISTORY_FILE] = hist
     end
 
+    # Workspace in the current context.
+    def workspace
+      @workspace_stack.last
+    end
+
+    # Replace the current workspace with the given +workspace+.
+    def replace_workspace(workspace)
+      @workspace_stack.pop
+      @workspace_stack.push(workspace)
+    end
+
     # The top-level workspace, see WorkSpace#main
     def main
-      @workspace.main
+      workspace.main
     end
 
     # The toplevel workspace, see #home_workspace
     attr_reader :workspace_home
-    # WorkSpace in the current context.
-    attr_accessor :workspace
     # The current thread in this context.
     attr_reader :thread
     # The current input method.
@@ -241,9 +228,27 @@ module IRB
     # Can be either name from <code>IRB.conf[:IRB_NAME]</code>, or the number of
     # the current job set by JobManager, such as <code>irb#2</code>
     attr_accessor :irb_name
-    # Can be either the #irb_name surrounded by parenthesis, or the
-    # +input_method+ passed to Context.new
-    attr_accessor :irb_path
+
+    # Can be one of the following:
+    # - the #irb_name surrounded by parenthesis
+    # - the +input_method+ passed to Context.new
+    # - the file path of the current IRB context in a binding.irb session
+    attr_reader :irb_path
+
+    # Sets @irb_path to the given +path+ as well as @eval_path
+    # @eval_path is used for evaluating code in the context of IRB session
+    # It's the same as irb_path, but with the IRB name postfix
+    # This makes sure users can distinguish the methods defined in the IRB session
+    # from the methods defined in the current file's context, especially with binding.irb
+    def irb_path=(path)
+      @irb_path = path
+
+      if File.exist?(path)
+        @eval_path = "#{path}(#{IRB.conf[:IRB_NAME]})"
+      else
+        @eval_path = path
+      end
+    end
 
     # Whether multiline editor mode is enabled or not.
     #
@@ -444,9 +449,7 @@ module IRB
     # StdioInputMethod or RelineInputMethod or ReadlineInputMethod, see #io
     # for more information.
     def prompting?
-      verbose? || (STDIN.tty? && @io.kind_of?(StdioInputMethod) ||
-                   @io.kind_of?(RelineInputMethod) ||
-                   (defined?(ReadlineInputMethod) && @io.kind_of?(ReadlineInputMethod)))
+      verbose? || @io.prompting?
     end
 
     # The return value of the last statement evaluated.
@@ -456,7 +459,7 @@ module IRB
     # to #last_value.
     def set_last_value(value)
       @last_value = value
-      @workspace.local_variable_set :_, value
+      workspace.local_variable_set :_, value
     end
 
     # Sets the +mode+ of the prompt in this context.
@@ -542,31 +545,115 @@ module IRB
       @inspect_mode
     end
 
-    def evaluate(line, line_no) # :nodoc:
+    def evaluate(statement, line_no) # :nodoc:
       @line_no = line_no
-      result = nil
 
+      case statement
+      when Statement::EmptyInput
+        return
+      when Statement::Expression
+        result = evaluate_expression(statement.code, line_no)
+        set_last_value(result)
+      when Statement::Command
+        statement.command_class.execute(self, statement.arg)
+      when Statement::IncorrectAlias
+        warn statement.message
+      end
+
+      nil
+    end
+
+    def from_binding?
+      @irb.from_binding
+    end
+
+    def evaluate_expression(code, line_no) # :nodoc:
+      result = nil
       if IRB.conf[:MEASURE] && IRB.conf[:MEASURE_CALLBACKS].empty?
         IRB.set_measure_callback
       end
 
       if IRB.conf[:MEASURE] && !IRB.conf[:MEASURE_CALLBACKS].empty?
         last_proc = proc do
-          result = @workspace.evaluate(line, irb_path, line_no)
+          result = workspace.evaluate(code, @eval_path, line_no)
         end
         IRB.conf[:MEASURE_CALLBACKS].inject(last_proc) do |chain, item|
           _name, callback, arg = item
           proc do
-            callback.(self, line, line_no, arg) do
+            callback.(self, code, line_no, arg) do
               chain.call
             end
           end
         end.call
       else
-        result = @workspace.evaluate(line, irb_path, line_no)
+        result = workspace.evaluate(code, @eval_path, line_no)
+      end
+      result
+    end
+
+    def parse_input(code, is_assignment_expression)
+      command_name, arg = code.strip.split(/\s+/, 2)
+      arg ||= ''
+
+      # command can only be 1 line
+      if code.lines.size != 1 ||
+        # command name is required
+        command_name.nil? ||
+        # local variable have precedence over command
+        local_variables.include?(command_name.to_sym) ||
+        # assignment expression is not a command
+        (is_assignment_expression ||
+        (arg.start_with?(ASSIGN_OPERATORS_REGEXP) && !arg.start_with?(/==|=~/)))
+        return Statement::Expression.new(code, is_assignment_expression)
       end
 
-      set_last_value(result)
+      command = command_name.to_sym
+
+      # Check command aliases
+      if aliased_name = command_aliases[command]
+        if command_class = Command.load_command(aliased_name)
+          command = aliased_name
+        elsif HelperMethod.helper_methods[aliased_name]
+          message = <<~MESSAGE
+            Using command alias `#{command}` for helper method `#{aliased_name}` is not supported.
+            Please check the value of `IRB.conf[:COMMAND_ALIASES]`.
+          MESSAGE
+          return Statement::IncorrectAlias.new(message)
+        else
+          message = <<~MESSAGE
+            You're trying to use command alias `#{command}` for command `#{aliased_name}`, but `#{aliased_name}` does not exist.
+            Please check the value of `IRB.conf[:COMMAND_ALIASES]`.
+          MESSAGE
+          return Statement::IncorrectAlias.new(message)
+        end
+      else
+        command_class = Command.load_command(command)
+      end
+
+      # Check visibility
+      public_method = !!KERNEL_PUBLIC_METHOD.bind_call(main, command) rescue false
+      private_method = !public_method && !!KERNEL_METHOD.bind_call(main, command) rescue false
+      if command_class && Command.execute_as_command?(command, public_method: public_method, private_method: private_method)
+        Statement::Command.new(code, command_class, arg)
+      else
+        Statement::Expression.new(code, is_assignment_expression)
+      end
+    end
+
+    def colorize_input(input, complete:)
+      if IRB.conf[:USE_COLORIZE] && IRB::Color.colorable?
+        lvars = local_variables || []
+        parsed_input = parse_input(input, false)
+        if parsed_input.is_a?(Statement::Command)
+          name, sep, arg = input.split(/(\s+)/, 2)
+          arg = IRB::Color.colorize_code(arg, complete: complete, local_variables: lvars)
+          "#{IRB::Color.colorize(name, [:BOLD])}\e[m#{sep}#{arg}"
+        else
+          IRB::Color.colorize_code(input, complete: complete, local_variables: lvars)
+        end
+      else
+        Reline::Unicode.escape_for_print(input)
+      end
     end
 
     def inspect_last_value # :nodoc:
@@ -604,16 +691,55 @@ module IRB
       workspace.binding.local_variables
     end
 
-    # Return true if it's aliased from the argument and it's not an identifier.
-    def symbol_alias?(command)
-      return nil if command.match?(/\A\w+\z/)
-      command_aliases.key?(command.to_sym)
+    def safe_method_call_on_main(method_name)
+      main_object = main
+      Object === main_object ? main_object.__send__(method_name) : Object.instance_method(method_name).bind_call(main_object)
     end
 
-    # Return true if the command supports transforming args
-    def transform_args?(command)
-      command = command_aliases.fetch(command.to_sym, command)
-      ExtendCommandBundle.load_command(command)&.respond_to?(:transform_args)
+    private
+
+    def term_interactive?
+      return true if ENV['TEST_IRB_FORCE_INTERACTIVE']
+      STDIN.tty? && ENV['TERM'] != 'dumb'
+    end
+
+    def build_completor
+      completor_type = IRB.conf[:COMPLETOR]
+
+      # Gem repl_type_completor is added to bundled gems in Ruby 3.4.
+      # Use :type as default completor only in Ruby 3.4 or later.
+      verbose = !!completor_type
+      completor_type ||= RUBY_VERSION >= '3.4' ? :type : :regexp
+
+      case completor_type
+      when :regexp
+        return RegexpCompletor.new
+      when :type
+        completor = build_type_completor(verbose: verbose)
+        return completor if completor
+      else
+        warn "Invalid value for IRB.conf[:COMPLETOR]: #{completor_type}"
+      end
+      # Fallback to RegexpCompletor
+      RegexpCompletor.new
+    end
+
+    def build_type_completor(verbose:)
+      if RUBY_ENGINE == 'truffleruby'
+        # Avoid SyntaxError. truffleruby does not support endless method definition yet.
+        warn 'TypeCompletor is not supported on TruffleRuby yet' if verbose
+        return
+      end
+
+      begin
+        require 'repl_type_completor'
+      rescue LoadError => e
+        warn "TypeCompletor requires `gem repl_type_completor`: #{e.message}" if verbose
+        return
+      end
+
+      ReplTypeCompletor.preload_rbs
+      TypeCompletor.new(self)
     end
   end
 end

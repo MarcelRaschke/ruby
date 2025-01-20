@@ -15,16 +15,18 @@ RSpec.describe "bundle help" do
     expect(out).to eq(%(["#{man_dir}/bundle-install.1"]))
   end
 
+  it "prexifes bundle commands with bundle- and resolves aliases when finding the man files" do
+    with_fake_man do
+      bundle "help package"
+    end
+    expect(out).to eq(%(["#{man_dir}/bundle-cache.1"]))
+  end
+
   it "simply outputs the human readable file when there is no man on the path" do
     with_path_as("") do
       bundle "help install"
     end
     expect(out).to match(/bundle-install/)
-  end
-
-  it "still outputs the old help for commands that do not have man pages yet" do
-    bundle "help fund"
-    expect(out).to include("Lists information about gems seeking funding assistance")
   end
 
   it "looks for a binary and executes it with --help option if it's named bundler-<task>" do

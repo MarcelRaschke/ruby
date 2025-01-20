@@ -1,18 +1,11 @@
-# NEWS for Ruby 3.4.0
+# NEWS for Ruby 3.5.0
 
 This document is a list of user-visible feature changes
-since the **3.3.0** release, except for bug fixes.
+since the **3.4.0** release, except for bug fixes.
 
 Note that each entry is kept to a minimum, see links for details.
 
 ## Language changes
-
-* `it` is added to reference a block parameter. [[Feature #18980]]
-
-* Keyword splatting `nil` when calling methods is now supported.
-  `**nil` is treated similar to `**{}`, passing no keywords,
-  and not calling any conversion methods.
-  [[Bug #20064]]
 
 ## Core classes updates
 
@@ -20,37 +13,40 @@ Note: We're only listing outstanding class updates.
 
 ## Stdlib updates
 
+The following bundled gems are promoted from default gems.
+
+* ostruct 0.6.1
+* pstore 0.1.4
+* benchmark 0.4.0
+* logger 1.6.5
+* rdoc 6.11.0
+* win32ole 1.9.1
+
+We only list stdlib changes that are notable feature changes.
+
+Other changes are listed in the following sections. we also listed release history from the previous bundled version that is Ruby 3.3.0 if it has GitHub releases.
+
+The following default gem is added.
+
+* win32-registry 0.1.0
+
 The following default gems are updated.
 
-* RubyGems 3.6.0.dev
-* bundler 2.6.0.dev
-* csv 3.2.9
-* erb 4.0.4
-* fiddle 1.1.3
-* io-console 0.7.2
-* net-http 0.4.1
-* reline 0.4.2
-* stringio 3.1.1
-* strscan 3.0.8
+* RubyGems 3.7.0.dev
+* bundler 2.7.0.dev
+* fiddle 1.1.7.dev
+* prism 1.3.0
+* psych 5.2.3
+* stringio 3.1.3.dev
+
+The following bundled gems are added.
+
 
 The following bundled gems are updated.
 
-* minitest 5.21.1
-* net-ftp 0.3.4
-* net-imap 0.4.9.1
-* net-smtp 0.4.0.1
-* rbs 3.4.1
-* typeprof 0.21.9
-* debug 1.9.1
-
-The following bundled gems are promoted from default gems.
-
-* mutex_m 0.2.0
-* getoptlong 0.2.1
-* base64 0.2.0
-* bigdecimal 3.1.5
-
-See GitHub releases like [GitHub Releases of Logger](https://github.com/ruby/logger/releases) or changelog for details of the default gems or bundled gems.
+* net-imap 0.5.5
+* rbs 3.8.1
+* bigdecimal 3.1.9
 
 ## Supported platforms
 
@@ -63,6 +59,3 @@ See GitHub releases like [GitHub Releases of Logger](https://github.com/ruby/log
 ## Implementation improvements
 
 ## JIT
-
-[Feature #18980]: https://bugs.ruby-lang.org/issues/18980
-[Bug #20064]: https://bugs.ruby-lang.org/issues/20064

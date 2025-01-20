@@ -102,6 +102,47 @@ class TestGemCommandsPushCommand < Gem::TestCase
                  @fetcher.last_request["Content-Type"]
   end
 
+  def test_execute_attestation
+    @response = "Successfully registered gem: freewill (1.0.0)"
+    @fetcher.data["#{Gem.host}/api/v1/gems"] = HTTPResponseFactory.create(body: @response, code: 200, msg: "OK")
+
+    File.write("#{@path}.sigstore.json", "attestation")
+    @cmd.options[:args] = [@path]
+    @cmd.options[:attestations] = ["#{@path}.sigstore.json"]
+
+    @cmd.execute
+
+    assert_equal Gem::Net::HTTP::Post, @fetcher.last_request.class
+    content_length = @fetcher.last_request["Content-Length"].to_i
+    assert_equal content_length, @fetcher.last_request.body.length
+    assert_equal "multipart", @fetcher.last_request.main_type, @fetcher.last_request.content_type
+    assert_equal "form-data", @fetcher.last_request.sub_type
+    assert_include @fetcher.last_request.type_params, "boundary"
+    boundary = @fetcher.last_request.type_params["boundary"]
+
+    parts = @fetcher.last_request.body.split(/(?:\r\n|\A)--#{Regexp.quote(boundary)}(?:\r\n|--)/m)
+    refute_empty parts
+    assert_empty parts[0]
+    parts.shift # remove the first empty part
+
+    p1 = parts.shift
+    p2 = parts.shift
+    assert_equal "\r\n", parts.shift
+    assert_empty parts
+
+    assert_equal [
+      "Content-Disposition: form-data; name=\"gem\"; filename=\"#{@path}\"",
+      "Content-Type: application/octet-stream",
+      nil,
+      Gem.read_binary(@path),
+    ].join("\r\n").b, p1
+    assert_equal [
+      "Content-Disposition: form-data; name=\"attestations\"",
+      nil,
+      "[#{Gem.read_binary("#{@path}.sigstore.json")}]",
+    ].join("\r\n").b, p2
+  end
+
   def test_execute_allowed_push_host
     @spec, @path = util_gem "freebird", "1.0.1" do |spec|
       spec.metadata["allowed_push_host"] = "https://privategemserver.example"
@@ -547,7 +588,7 @@ class TestGemCommandsPushCommand < Gem::TestCase
     access_notice = "The existing key doesn't have access of push_rubygem on https://rubygems.example. Please sign in to update access."
     assert_match mfa_notice, @ui.output
     assert_match access_notice, @ui.output
-    assert_match "Email:", @ui.output
+    assert_match "Username/email:", @ui.output
     assert_match "Password:", @ui.output
     assert_match "Added push_rubygem scope to the existing API key", @ui.output
     assert_match response_success, @ui.output
@@ -588,7 +629,7 @@ class TestGemCommandsPushCommand < Gem::TestCase
     mfa_notice = "You have enabled multi-factor authentication. Please enter OTP code."
     assert_match mfa_notice, @ui.output
     assert_match "Enter your https://rubygems.example credentials.", @ui.output
-    assert_match "Email:", @ui.output
+    assert_match "Username/email:", @ui.output
     assert_match "Password:", @ui.output
     assert_match "Signed in with API key:", @ui.output
     assert_match response_success, @ui.output

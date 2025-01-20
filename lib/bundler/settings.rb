@@ -7,7 +7,6 @@ module Bundler
     autoload :Validator, File.expand_path("settings/validator", __dir__)
 
     BOOL_KEYS = %w[
-      allow_deployment_source_credential_changes
       allow_offline_install
       auto_clean_without_path
       auto_install
@@ -33,6 +32,7 @@ module Bundler
       ignore_messages
       init_gems_rb
       inline
+      lockfile_checksums
       no_install
       no_prune
       path_relative_to_cwd
@@ -104,6 +104,7 @@ module Bundler
     def initialize(root = nil)
       @root            = root
       @local_config    = load_config(local_config_file)
+      @local_root      = root || Pathname.new(".bundle").expand_path
 
       @env_config      = ENV.to_h
       @env_config.select! {|key, _value| key.start_with?("BUNDLE_") }
@@ -143,7 +144,7 @@ module Bundler
     end
 
     def set_local(key, value)
-      local_config_file || raise(GemfileNotFound, "Could not locate Gemfile")
+      local_config_file = @local_root.join("config")
 
       set_key(key, value, @local_config, local_config_file)
     end
@@ -189,7 +190,7 @@ module Bundler
     def mirror_for(uri)
       if uri.is_a?(String)
         require_relative "vendored_uri"
-        uri = Bundler::URI(uri)
+        uri = Gem::URI(uri)
       end
 
       gem_mirrors.for(uri.to_s).uri
@@ -425,8 +426,12 @@ module Bundler
       Validator.validate!(raw_key, converted_value(value, raw_key), hash)
 
       return unless file
+
+      SharedHelpers.filesystem_access(file.dirname, :create) do |p|
+        FileUtils.mkdir_p(p)
+      end
+
       SharedHelpers.filesystem_access(file) do |p|
-        FileUtils.mkdir_p(p.dirname)
         p.open("w") {|f| f.write(serializer_class.dump(hash)) }
       end
     end
@@ -492,16 +497,23 @@ module Bundler
         valid_file = file.exist? && !file.size.zero?
         return {} unless valid_file
         serializer_class.load(file.read).inject({}) do |config, (k, v)|
-          if k.include?("-")
-            Bundler.ui.warn "Your #{file} config includes `#{k}`, which contains the dash character (`-`).\n" \
-              "This is deprecated, because configuration through `ENV` should be possible, but `ENV` keys cannot include dashes.\n" \
-              "Please edit #{file} and replace any dashes in configuration keys with a triple underscore (`___`)."
+          k = k.dup
+          k << "/" if /https?:/i.match?(k) && !k.end_with?("/", "__#{FALLBACK_TIMEOUT_URI_OPTION.upcase}")
+          k.gsub!(".", "__")
 
-            # string hash keys are frozen
-            k = k.gsub("-", "___")
+          unless k.start_with?("#")
+            if k.include?("-")
+              Bundler.ui.warn "Your #{file} config includes `#{k}`, which contains the dash character (`-`).\n" \
+                "This is deprecated, because configuration through `ENV` should be possible, but `ENV` keys cannot include dashes.\n" \
+                "Please edit #{file} and replace any dashes in configuration keys with a triple underscore (`___`)."
+
+              # string hash keys are frozen
+              k = k.gsub("-", "___")
+            end
+
+            config[k] = v
           end
 
-          config[k] = v
           config
         end
       end
@@ -516,26 +528,25 @@ module Bundler
       YAMLSerializer
     end
 
-    PER_URI_OPTIONS = %w[
-      fallback_timeout
-    ].freeze
+    FALLBACK_TIMEOUT_URI_OPTION = "fallback_timeout"
 
     NORMALIZE_URI_OPTIONS_PATTERN =
       /
         \A
         (\w+\.)? # optional prefix key
         (https?.*?) # URI
-        (\.#{Regexp.union(PER_URI_OPTIONS)})? # optional suffix key
+        (\.#{FALLBACK_TIMEOUT_URI_OPTION})? # optional suffix key
         \z
       /ix
 
     def self.key_for(key)
-      key = normalize_uri(key).to_s if key.is_a?(String) && key.start_with?("http", "mirror.http")
-      key = key_to_s(key).gsub(".", "__")
+      key = key_to_s(key)
+      key = normalize_uri(key) if key.start_with?("http", "mirror.http")
+      key = key.gsub(".", "__")
       key.gsub!("-", "___")
       key.upcase!
 
-      key.prepend("BUNDLE_")
+      key.gsub(/\A([ #]*)/, '\1BUNDLE_')
     end
 
     # TODO: duplicates Rubygems#normalize_uri
@@ -549,7 +560,7 @@ module Bundler
       end
       uri = URINormalizer.normalize_suffix(uri)
       require_relative "vendored_uri"
-      uri = Bundler::URI(uri)
+      uri = Gem::URI(uri)
       unless uri.absolute?
         raise ArgumentError, format("Gem sources must be absolute. You provided '%s'.", uri)
       end
@@ -564,7 +575,7 @@ module Bundler
           key
         when Symbol
           key.name
-        when Bundler::URI::HTTP
+        when Gem::URI::HTTP
           key.to_s
         else
           raise ArgumentError, "Invalid key: #{key.inspect}"
@@ -577,7 +588,7 @@ module Bundler
           key
         when Symbol
           key.to_s
-        when Bundler::URI::HTTP
+        when Gem::URI::HTTP
           key.to_s
         else
           raise ArgumentError, "Invalid key: #{key.inspect}"

@@ -3,7 +3,7 @@
 require_relative "vendored_persistent"
 require_relative "vendored_timeout"
 require "cgi"
-require "securerandom"
+require_relative "vendored_securerandom"
 require "zlib"
 
 module Bundler
@@ -37,8 +37,9 @@ module Bundler
     # This is the error raised when a source is HTTPS and OpenSSL didn't load
     class SSLError < HTTPError
       def initialize(msg = nil)
-        super msg || "Could not load OpenSSL.\n" \
-            "You must recompile Ruby with OpenSSL support."
+        super "Could not load OpenSSL.\n" \
+          "You must recompile Ruby with OpenSSL support.\n" \
+          "original error: #{msg}\n"
       end
     end
 
@@ -111,7 +112,7 @@ module Bundler
       spec -= [nil, "ruby", ""]
       spec_file_name = "#{spec.join "-"}.gemspec"
 
-      uri = Bundler::URI.parse("#{remote_uri}#{Gem::MARSHAL_SPEC_DIR}#{spec_file_name}.rz")
+      uri = Gem::URI.parse("#{remote_uri}#{Gem::MARSHAL_SPEC_DIR}#{spec_file_name}.rz")
       spec = if uri.scheme == "file"
         path = Gem::Util.correct_for_windows_path(uri.path)
         Bundler.safe_load_marshal Bundler.rubygems.inflate(Gem.read_binary(path))
@@ -182,7 +183,7 @@ module Bundler
         agent << " ci/#{cis.join(",")}" if cis.any?
 
         # add a random ID so we can consolidate runs server-side
-        agent << " " << SecureRandom.hex(8)
+        agent << " " << Gem::SecureRandom.hex(8)
 
         # add any user agent strings set in the config
         extra_ua = Bundler.settings[:user_agent]
@@ -251,11 +252,17 @@ module Bundler
         needs_ssl = remote_uri.scheme == "https" ||
                     Bundler.settings[:ssl_verify_mode] ||
                     Bundler.settings[:ssl_client_cert]
-        raise SSLError if needs_ssl && !defined?(OpenSSL::SSL)
+        if needs_ssl
+          begin
+            require "openssl"
+          rescue StandardError, LoadError => e
+            raise SSLError.new(e.message)
+          end
+        end
 
         con = Gem::Net::HTTP::Persistent.new name: "bundler", proxy: :ENV
         if gem_proxy = Gem.configuration[:http_proxy]
-          con.proxy = Bundler::URI.parse(gem_proxy) if gem_proxy != :no_proxy
+          con.proxy = Gem::URI.parse(gem_proxy) if gem_proxy != :no_proxy
         end
 
         if remote_uri.scheme == "https"

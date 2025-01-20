@@ -552,39 +552,6 @@ num_clone(int argc, VALUE *argv, VALUE x)
 # define num_clone rb_immutable_obj_clone
 #endif
 
-#if 0
-/*
- *  call-seq:
- *    dup -> self
- *
- *  Returns +self+.
- *
- *  Related: Numeric#clone.
- *
- */
-static VALUE
-num_dup(VALUE x)
-{
-    return x;
-}
-#else
-# define num_dup num_uplus
-#endif
-
-/*
- *  call-seq:
- *    +self -> self
- *
- *  Returns +self+.
- *
- */
-
-static VALUE
-num_uplus(VALUE num)
-{
-    return num;
-}
-
 /*
  *  call-seq:
  *    i -> complex
@@ -836,7 +803,7 @@ int_zero_p(VALUE num)
     if (FIXNUM_P(num)) {
         return FIXNUM_ZERO_P(num);
     }
-    assert(RB_BIGNUM_TYPE_P(num));
+    RUBY_ASSERT(RB_BIGNUM_TYPE_P(num));
     return rb_bigzero_p(num);
 }
 
@@ -861,6 +828,8 @@ rb_int_zero_p(VALUE num)
  *
  *  Of the Core and Standard Library classes,
  *  Integer, Float, Rational, and Complex use this implementation.
+ *
+ * Related: #zero?
  *
  */
 
@@ -888,7 +857,7 @@ num_nonzero_p(VALUE num)
  *    Rational(1, 2).to_int # => 0
  *    Rational(2, 1).to_int # => 2
  *    Complex(2, 0).to_int  # => 2
- *    Complex(2, 1)         # Raises RangeError (non-zero imaginary part)
+ *    Complex(2, 1).to_int  # Raises RangeError (non-zero imaginary part)
  *
  */
 
@@ -957,11 +926,11 @@ num_negative_p(VALUE num)
  *
  *  You can convert certain objects to Floats with:
  *
- *  - \Method #Float.
+ *  - Method #Float.
  *
  *  == What's Here
  *
- *  First, what's elsewhere. \Class \Float:
+ *  First, what's elsewhere. Class \Float:
  *
  *  - Inherits from
  *    {class Numeric}[rdoc-ref:Numeric@What-27s+Here]
@@ -1045,16 +1014,15 @@ rb_float_new_in_heap(double d)
  *  may contain:
  *
  *  - A fixed-point number.
+ *      3.14.to_s         # => "3.14"
  *  - A number in "scientific notation" (containing an exponent).
+ *      (10.1**50).to_s   # => "1.644631821843879e+50"
  *  - 'Infinity'.
+ *      (10.1**500).to_s  # => "Infinity"
  *  - '-Infinity'.
+ *      (-10.1**500).to_s # => "-Infinity"
  *  - 'NaN' (indicating not-a-number).
- *
- *    3.14.to_s         # => "3.14"
- *    (10.1**50).to_s   # => "1.644631821843879e+50"
- *    (10.1**500).to_s  # => "Infinity"
- *    (-10.1**500).to_s # => "-Infinity"
- *    (0.0/0.0).to_s    # => "NaN"
+ *      (0.0/0.0).to_s    # => "NaN"
  *
  */
 
@@ -1553,7 +1521,7 @@ rb_float_pow(VALUE x, VALUE y)
  *    1.eql?(Rational(1, 1)) # => false
  *    1.eql?(Complex(1, 0))  # => false
  *
- *  \Method +eql?+ is different from <tt>==</tt> in that +eql?+ requires matching types,
+ *  Method +eql?+ is different from <tt>==</tt> in that +eql?+ requires matching types,
  *  while <tt>==</tt> does not.
  *
  */
@@ -2168,36 +2136,78 @@ flo_ndigits(int argc, VALUE *argv)
 }
 
 /*
+ *  :markup: markdown
+ *
  *  call-seq:
  *    floor(ndigits = 0) -> float or integer
  *
- *  Returns the largest number less than or equal to +self+ with
- *  a precision of +ndigits+ decimal digits.
+ *  Returns a float or integer that is a "floor" value for `self`,
+ *  as specified by `ndigits`,
+ *  which must be an
+ *  [integer-convertible object](rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects).
  *
- *  When +ndigits+ is positive, returns a float with +ndigits+
+ *  When `self` is zero,
+ *  returns a zero value:
+ *  a float if `ndigits` is positive,
+ *  an integer otherwise:
+ *
+ *  ```
+ *  f = 0.0      # => 0.0
+ *  f.floor(20)  # => 0.0
+ *  f.floor(0)   # => 0
+ *  f.floor(-20) # => 0
+ *  ```
+ *
+ *  When `self` is non-zero and `ndigits` is positive, returns a float with `ndigits`
  *  digits after the decimal point (as available):
  *
- *    f = 12345.6789
- *    f.floor(1) # => 12345.6
- *    f.floor(3) # => 12345.678
- *    f = -12345.6789
- *    f.floor(1) # => -12345.7
- *    f.floor(3) # => -12345.679
+ *  ```
+ *  f = 12345.6789
+ *  f.floor(1)  # => 12345.6
+ *  f.floor(3)  # => 12345.678
+ *  f.floor(30) # => 12345.6789
+ *  f = -12345.6789
+ *  f.floor(1)  # => -12345.7
+ *  f.floor(3)  # => -12345.679
+ *  f.floor(30) # => -12345.6789
+ *  ```
  *
- *  When +ndigits+ is non-positive, returns an integer with at least
- *  <code>ndigits.abs</code> trailing zeros:
+ *  When `self` is non-zero and `ndigits` is non-positive,
+ *  returns an integer value based on a computed granularity:
  *
- *    f = 12345.6789
- *    f.floor(0)  # => 12345
- *    f.floor(-3) # => 12000
- *    f = -12345.6789
- *    f.floor(0)  # => -12346
- *    f.floor(-3) # => -13000
+ *  - The granularity is `10 ** ndigits.abs`.
+ *  - The returned value is the largest multiple of the granularity
+ *    that is less than or equal to `self`.
+ *
+ *  Examples with positive `self`:
+ *
+ *  | ndigits | Granularity | 12345.6789.floor(ndigits) |
+ *  |--------:|------------:|--------------------------:|
+ *  |       0 |           1 |                     12345 |
+ *  |      -1 |          10 |                     12340 |
+ *  |      -2 |         100 |                     12300 |
+ *  |      -3 |        1000 |                     12000 |
+ *  |      -4 |       10000 |                     10000 |
+ *  |      -5 |      100000 |                         0 |
+ *
+ *  Examples with negative `self`:
+ *
+ *  | ndigits | Granularity | -12345.6789.floor(ndigits) |
+ *  |--------:|------------:|---------------------------:|
+ *  |       0 |           1 |                     -12346 |
+ *  |      -1 |          10 |                     -12350 |
+ *  |      -2 |         100 |                     -12400 |
+ *  |      -3 |        1000 |                     -13000 |
+ *  |      -4 |       10000 |                     -20000 |
+ *  |      -5 |      100000 |                    -100000 |
+ *  |      -6 |     1000000 |                   -1000000 |
  *
  *  Note that the limited precision of floating-point arithmetic
  *  may lead to surprising results:
  *
- *     (0.3 / 0.1).floor  #=> 2 (!)
+ *  ```
+ *  (0.3 / 0.1).floor  # => 2 # Not 3, (because (0.3 / 0.1) # => 2.9999999999999996, not 3.0)
+ *  ```
  *
  *  Related: Float#ceil.
  *
@@ -2211,36 +2221,78 @@ flo_floor(int argc, VALUE *argv, VALUE num)
 }
 
 /*
+ *  :markup: markdown
+ *
  *  call-seq:
  *    ceil(ndigits = 0) -> float or integer
  *
- *  Returns the smallest number greater than or equal to +self+ with
- *  a precision of +ndigits+ decimal digits.
+ *  Returns a numeric that is a "ceiling" value for `self`,
+ *  as specified by the given `ndigits`,
+ *  which must be an
+ *  [integer-convertible object](rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects).
  *
- *  When +ndigits+ is positive, returns a float with +ndigits+
- *  digits after the decimal point (as available):
+ *  When `ndigits` is positive, returns a Float with `ndigits`
+ *  decimal digits after the decimal point
+ *  (as available, but no fewer than 1):
  *
- *    f = 12345.6789
- *    f.ceil(1) # => 12345.7
- *    f.ceil(3) # => 12345.679
- *    f = -12345.6789
- *    f.ceil(1) # => -12345.6
- *    f.ceil(3) # => -12345.678
+ *  ```
+ *  f = 12345.6789
+ *  f.ceil(1) # => 12345.7
+ *  f.ceil(3) # => 12345.679
+ *  f.ceil(30) # => 12345.6789
+ *  f = -12345.6789
+ *  f.ceil(1) # => -12345.6
+ *  f.ceil(3) # => -12345.678
+ *  f.ceil(30) # => -12345.6789
+ *  f = 0.0
+ *  f.ceil(1)   # => 0.0
+ *  f.ceil(100) # => 0.0
+ *  ```
  *
- *  When +ndigits+ is non-positive, returns an integer with at least
- *  <code>ndigits.abs</code> trailing zeros:
+ *  When `ndigits` is non-positive,
+ *  returns an Integer based on a computed granularity:
  *
- *    f = 12345.6789
- *    f.ceil(0)  # => 12346
- *    f.ceil(-3) # => 13000
- *    f = -12345.6789
- *    f.ceil(0)  # => -12345
- *    f.ceil(-3) # => -12000
+ *  - The granularity is `10 ** ndigits.abs`.
+ *  - The returned value is the largest multiple of the granularity
+ *    that is less than or equal to `self`.
+ *
+ *  Examples with positive `self`:
+ *
+ *  | ndigits | Granularity | 12345.6789.ceil(ndigits) |
+ *  |--------:|------------:|-------------------------:|
+ *  | 0       | 1           | 12346                    |
+ *  | -1      | 10          | 12350                    |
+ *  | -2      | 100         | 12400                    |
+ *  | -3      | 1000        | 13000                    |
+ *  | -4      | 10000       | 20000                    |
+ *  | -5      | 100000      | 100000                   |
+ *
+ *  Examples with negative `self`:
+ *
+ *  | ndigits | Granularity | -12345.6789.ceil(ndigits) |
+ *  |--------:|------------:|--------------------------:|
+ *  | 0       | 1           | -12345                    |
+ *  | -1      | 10          | -12340                    |
+ *  | -2      | 100         | -12300                    |
+ *  | -3      | 1000        | -12000                    |
+ *  | -4      | 10000       | -10000                    |
+ *  | -5      | 100000      | 0                         |
+ *
+ *  When `self` is zero and `ndigits` is non-positive,
+ *  returns Integer zero:
+ *
+ *  ```
+ *  0.0.ceil(0)  # => 0
+ *  0.0.ceil(-1) # => 0
+ *  0.0.ceil(-2) # => 0
+ *  ```
  *
  *  Note that the limited precision of floating-point arithmetic
  *  may lead to surprising results:
  *
- *     (2.1 / 0.7).ceil  #=> 4 (!)
+ *  ```
+ *  (2.1 / 0.7).ceil  #=> 4 # Not 3 (because 2.1 / 0.7 # => 3.0000000000000004, not 3.0)
+ *  ```
  *
  *  Related: Float#floor.
  *
@@ -2376,11 +2428,7 @@ rb_int_round(VALUE num, int ndigits, enum ruby_num_rounding_mode mode)
 static VALUE
 rb_int_floor(VALUE num, int ndigits)
 {
-    VALUE f;
-
-    if (int_round_zero_p(num, ndigits))
-        return INT2FIX(0);
-    f = int_pow(10, -ndigits);
+    VALUE f = int_pow(10, -ndigits);
     if (FIXNUM_P(num) && FIXNUM_P(f)) {
         SIGNED_VALUE x = FIX2LONG(num), y = FIX2LONG(f);
         int neg = x < 0;
@@ -2389,21 +2437,19 @@ rb_int_floor(VALUE num, int ndigits)
         if (neg) x = -x;
         return LONG2NUM(x);
     }
-    if (RB_FLOAT_TYPE_P(f)) {
-        /* then int_pow overflow */
-        return INT2FIX(0);
+    else {
+        bool neg = int_neg_p(num);
+        if (neg) num = rb_int_minus(rb_int_plus(rb_int_uminus(num), f), INT2FIX(1));
+        num = rb_int_mul(rb_int_div(num, f), f);
+        if (neg) num = rb_int_uminus(num);
+        return num;
     }
-    return rb_int_minus(num, rb_int_modulo(num, f));
 }
 
 static VALUE
 rb_int_ceil(VALUE num, int ndigits)
 {
-    VALUE f;
-
-    if (int_round_zero_p(num, ndigits))
-        return INT2FIX(0);
-    f = int_pow(10, -ndigits);
+    VALUE f = int_pow(10, -ndigits);
     if (FIXNUM_P(num) && FIXNUM_P(f)) {
         SIGNED_VALUE x = FIX2LONG(num), y = FIX2LONG(f);
         int neg = x < 0;
@@ -2413,11 +2459,16 @@ rb_int_ceil(VALUE num, int ndigits)
         if (neg) x = -x;
         return LONG2NUM(x);
     }
-    if (RB_FLOAT_TYPE_P(f)) {
-        /* then int_pow overflow */
-        return INT2FIX(0);
+    else {
+        bool neg = int_neg_p(num);
+        if (neg)
+            num = rb_int_uminus(num);
+        else
+            num = rb_int_plus(num, rb_int_minus(f, INT2FIX(1)));
+        num = rb_int_mul(rb_int_div(num, f), f);
+        if (neg) num = rb_int_uminus(num);
+        return num;
     }
-    return rb_int_plus(num, rb_int_minus(f, rb_int_modulo(num, f)));
 }
 
 VALUE
@@ -2654,13 +2705,16 @@ flo_truncate(int argc, VALUE *argv, VALUE num)
 
 /*
  *  call-seq:
- *    floor(digits = 0) -> integer or float
+ *    floor(ndigits = 0) -> float or integer
  *
- *  Returns the largest number that is less than or equal to +self+ with
- *  a precision of +digits+ decimal digits.
+ *  Returns the largest float or integer that is less than or equal to +self+,
+ *  as specified by the given `ndigits`,
+ *  which must be an
+ *  {integer-convertible object}[rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects].
  *
- *  \Numeric implements this by converting +self+ to a Float and
- *  invoking Float#floor.
+ *  Equivalent to <tt>self.to_f.floor(ndigits)</tt>.
+ *
+ *  Related: #ceil, Float#floor.
  */
 
 static VALUE
@@ -2671,13 +2725,16 @@ num_floor(int argc, VALUE *argv, VALUE num)
 
 /*
  *  call-seq:
- *    ceil(digits = 0) -> integer or float
+ *    ceil(ndigits = 0) -> float or integer
  *
- *  Returns the smallest number that is greater than or equal to +self+ with
- *  a precision of +digits+ decimal digits.
+ *  Returns the smallest float or integer that is greater than or equal to +self+,
+ *  as specified by the given `ndigits`,
+ *  which must be an
+ *  {integer-convertible object}[rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects].
  *
- *  \Numeric implements this by converting +self+ to a Float and
- *  invoking Float#ceil.
+ *  Equivalent to <tt>self.to_f.ceil(ndigits)</tt>.
+ *
+ *  Related: #floor, Float#ceil.
  */
 
 static VALUE
@@ -3213,7 +3270,7 @@ rb_num2ulong(VALUE val)
 void
 rb_out_of_int(SIGNED_VALUE num)
 {
-    rb_raise(rb_eRangeError, "integer %"PRIdVALUE " too %s to convert to `int'",
+    rb_raise(rb_eRangeError, "integer %"PRIdVALUE " too %s to convert to 'int'",
              num, num < 0 ? "small" : "big");
 }
 
@@ -3232,12 +3289,12 @@ check_uint(unsigned long num, int sign)
     if (sign) {
         /* minus */
         if (num < (unsigned long)INT_MIN)
-            rb_raise(rb_eRangeError, "integer %ld too small to convert to `unsigned int'", (long)num);
+            rb_raise(rb_eRangeError, "integer %ld too small to convert to 'unsigned int'", (long)num);
     }
     else {
         /* plus */
         if (UINT_MAX < num)
-            rb_raise(rb_eRangeError, "integer %lu too big to convert to `unsigned int'", num);
+            rb_raise(rb_eRangeError, "integer %lu too big to convert to 'unsigned int'", num);
     }
 }
 
@@ -3312,7 +3369,7 @@ NORETURN(static void rb_out_of_short(SIGNED_VALUE num));
 static void
 rb_out_of_short(SIGNED_VALUE num)
 {
-    rb_raise(rb_eRangeError, "integer %"PRIdVALUE " too %s to convert to `short'",
+    rb_raise(rb_eRangeError, "integer %"PRIdVALUE " too %s to convert to 'short'",
              num, num < 0 ? "small" : "big");
 }
 
@@ -3330,12 +3387,12 @@ check_ushort(unsigned long num, int sign)
     if (sign) {
         /* minus */
         if (num < (unsigned long)SHRT_MIN)
-            rb_raise(rb_eRangeError, "integer %ld too small to convert to `unsigned short'", (long)num);
+            rb_raise(rb_eRangeError, "integer %ld too small to convert to 'unsigned short'", (long)num);
     }
     else {
         /* plus */
         if (USHRT_MAX < num)
-            rb_raise(rb_eRangeError, "integer %lu too big to convert to `unsigned short'", num);
+            rb_raise(rb_eRangeError, "integer %lu too big to convert to 'unsigned short'", num);
     }
 }
 
@@ -3482,14 +3539,14 @@ rb_num2ull(VALUE val)
  *
  * You can convert certain objects to Integers with:
  *
- * - \Method #Integer.
+ * - Method #Integer.
  *
  * An attempt to add a singleton method to an instance of this class
  * causes an exception to be raised.
  *
  * == What's Here
  *
- * First, what's elsewhere. \Class \Integer:
+ * First, what's elsewhere. Class \Integer:
  *
  * - Inherits from
  *   {class Numeric}[rdoc-ref:Numeric@What-27s+Here]
@@ -3535,6 +3592,7 @@ rb_num2ull(VALUE val)
  * - #>>: Returns the value of +self+ after a rightward bit-shift.
  * - #[]: Returns a slice of bits from +self+.
  * - #^: Returns the bitwise EXCLUSIVE OR of +self+ and the given value.
+ * - #|: Returns the bitwise OR of +self+ and the given value.
  * - #ceil: Returns the smallest number greater than or equal to +self+.
  * - #chr: Returns a 1-character string containing the character
  *   represented by the value of +self+.
@@ -3554,7 +3612,6 @@ rb_num2ull(VALUE val)
  * - #to_s (aliased as #inspect): Returns a string containing the place-value
  *   representation of +self+ in the given radix.
  * - #truncate: Returns +self+ truncated to the given precision.
- * - #|: Returns the bitwise OR of +self+ and the given value.
  *
  * === Other
  *
@@ -3574,7 +3631,7 @@ rb_int_odd_p(VALUE num)
         return RBOOL(num & 2);
     }
     else {
-        assert(RB_BIGNUM_TYPE_P(num));
+        RUBY_ASSERT(RB_BIGNUM_TYPE_P(num));
         return rb_big_odd_p(num);
     }
 }
@@ -3586,7 +3643,7 @@ int_even_p(VALUE num)
         return RBOOL((num & 2) == 0);
     }
     else {
-        assert(RB_BIGNUM_TYPE_P(num));
+        RUBY_ASSERT(RB_BIGNUM_TYPE_P(num));
         return rb_big_even_p(num);
     }
 }
@@ -3843,7 +3900,7 @@ rb_int_uminus(VALUE num)
         return fix_uminus(num);
     }
     else {
-        assert(RB_BIGNUM_TYPE_P(num));
+        RUBY_ASSERT(RB_BIGNUM_TYPE_P(num));
         return rb_big_uminus(num);
     }
 }
@@ -4359,7 +4416,7 @@ int_remainder(VALUE x, VALUE y)
     if (FIXNUM_P(x)) {
         if (FIXNUM_P(y)) {
             VALUE z = fix_mod(x, y);
-            assert(FIXNUM_P(z));
+            RUBY_ASSERT(FIXNUM_P(z));
             if (z != INT2FIX(0) && (SIGNED_VALUE)(x ^ y) < 0)
                 z = fix_minus(z, y);
             return z;
@@ -4709,7 +4766,7 @@ rb_int_cmp(VALUE x, VALUE y)
         return rb_big_cmp(x, y);
     }
     else {
-        rb_raise(rb_eNotImpError, "need to define `<=>' in %s", rb_obj_classname(x));
+        rb_raise(rb_eNotImpError, "need to define '<=>' in %s", rb_obj_classname(x));
     }
 }
 
@@ -5169,7 +5226,7 @@ fix_rshift(long val, unsigned long i)
  *
  */
 
-static VALUE
+VALUE
 rb_int_rshift(VALUE x, VALUE y)
 {
     if (FIXNUM_P(x)) {
@@ -5444,7 +5501,7 @@ rb_fix_digits(VALUE fix, long base)
     VALUE digits;
     long x = FIX2LONG(fix);
 
-    assert(x >= 0);
+    RUBY_ASSERT(x >= 0);
 
     if (base < 2)
         rb_raise(rb_eArgError, "invalid radix %ld", base);
@@ -5453,11 +5510,12 @@ rb_fix_digits(VALUE fix, long base)
         return rb_ary_new_from_args(1, INT2FIX(0));
 
     digits = rb_ary_new();
-    while (x > 0) {
+    while (x >= base) {
         long q = x % base;
         rb_ary_push(digits, LONG2NUM(q));
         x /= base;
     }
+    rb_ary_push(digits, LONG2NUM(x));
 
     return digits;
 }
@@ -5467,7 +5525,7 @@ rb_int_digits_bigbase(VALUE num, VALUE base)
 {
     VALUE digits, bases;
 
-    assert(!rb_num_negative_p(num));
+    RUBY_ASSERT(!rb_num_negative_p(num));
 
     if (RB_BIGNUM_TYPE_P(base))
         base = rb_big_norm(base);
@@ -5664,6 +5722,12 @@ int_downto(VALUE from, VALUE to)
     return from;
 }
 
+static VALUE
+int_dotimes_size(VALUE num, VALUE args, VALUE eobj)
+{
+    return int_neg_p(num) ? INT2FIX(0) : num;
+}
+
 /*
  *  call-seq:
  *    round(ndigits= 0, half: :up) -> integer
@@ -5730,24 +5794,56 @@ int_round(int argc, VALUE* argv, VALUE num)
 }
 
 /*
+ *  :markup: markdown
+ *
  *  call-seq:
  *    floor(ndigits = 0) -> integer
  *
- *  Returns the largest number less than or equal to +self+ with
- *  a precision of +ndigits+ decimal digits.
+ *  Returns an integer that is a "floor" value for `self`,
+ *  as specified by the given `ndigits`,
+ *  which must be an
+ *  [integer-convertible object](rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects).
  *
- *  When +ndigits+ is negative, the returned value
- *  has at least <tt>ndigits.abs</tt> trailing zeros:
+ *  - When `self` is zero, returns zero (regardless of the value of `ndigits`):
  *
- *    555.floor(-1)  # => 550
- *    555.floor(-2)  # => 500
- *    -555.floor(-2) # => -600
- *    555.floor(-3)  # => 0
+ *      ```
+ *      0.floor(2)  # => 0
+ *      0.floor(-2) # => 0
+ *      ```
  *
- *  Returns +self+ when +ndigits+ is zero or positive.
+ *  - When `self` is non-zero and `ndigits` is non-negative, returns `self`:
  *
- *    555.floor     # => 555
- *    555.floor(50) # => 555
+ *      ```
+ *      555.floor     # => 555
+ *      555.floor(50) # => 555
+ *      ```
+ *
+ *  - When `self` is non-zero and `ndigits` is negative,
+ *    returns a value based on a computed granularity:
+ *
+ *      - The granularity is `10 ** ndigits.abs`.
+ *      - The returned value is the largest multiple of the granularity
+ *        that is less than or equal to `self`.
+ *
+ *      Examples with positive `self`:
+ *
+ *      | ndigits | Granularity | 1234.floor(ndigits) |
+ *      |--------:|------------:|--------------------:|
+ *      | -1      | 10          | 1230                |
+ *      | -2      | 100         | 1200                |
+ *      | -3      | 1000        | 1000                |
+ *      | -4      | 10000       | 0                   |
+ *      | -5      | 100000      | 0                   |
+ *
+ *      Examples with negative `self`:
+ *
+ *      | ndigits | Granularity | -1234.floor(ndigits) |
+ *      |--------:|------------:|---------------------:|
+ *      | -1      | 10          | -1240                |
+ *      | -2      | 100         | -1300                |
+ *      | -3      | 1000        | -2000                |
+ *      | -4      | 10000       | -10000               |
+ *      | -5      | 100000      | -100000              |
  *
  *  Related: Integer#ceil.
  *
@@ -5767,27 +5863,58 @@ int_floor(int argc, VALUE* argv, VALUE num)
 }
 
 /*
+ *  :markup: markdown
+ *
  *  call-seq:
  *    ceil(ndigits = 0) -> integer
  *
- *  Returns the smallest number greater than or equal to +self+ with
- *  a precision of +ndigits+ decimal digits.
+ *  Returns an integer that is a "ceiling" value for `self`,
+ *  as specified by the given `ndigits`,
+ *  which must be an
+ *  [integer-convertible object](rdoc-ref:implicit_conversion.rdoc@Integer-Convertible+Objects).
  *
- *  When the precision is negative, the returned value is an integer
- *  with at least <code>ndigits.abs</code> trailing zeros:
+ *  - When `self` is zero, returns zero (regardless of the value of `ndigits`):
  *
- *    555.ceil(-1)  # => 560
- *    555.ceil(-2)  # => 600
- *    -555.ceil(-2) # => -500
- *    555.ceil(-3)  # => 1000
+ *      ```
+ *      0.ceil(2)  # => 0
+ *      0.ceil(-2) # => 0
+ *      ```
  *
- *  Returns +self+ when +ndigits+ is zero or positive.
+ *  - When `self` is non-zero and `ndigits` is non-negative, returns `self`:
  *
- *     555.ceil     # => 555
- *     555.ceil(50) # => 555
+ *      ```
+ *      555.ceil     # => 555
+ *      555.ceil(50) # => 555
+ *      ```
+ *
+ *  - When `self` is non-zero and `ndigits` is negative,
+ *    returns a value based on a computed granularity:
+ *
+ *      - The granularity is `10 ** ndigits.abs`.
+ *      - The returned value is the smallest multiple of the granularity
+ *        that is greater than or equal to `self`.
+ *
+ *      Examples with positive `self`:
+ *
+ *      | ndigits | Granularity | 1234.ceil(ndigits) |
+ *      |--------:|------------:|-------------------:|
+ *      | -1      | 10          | 1240               |
+ *      | -2      | 100         | 1300               |
+ *      | -3      | 1000        | 2000               |
+ *      | -4      | 10000       | 10000              |
+ *      | -5      | 100000      | 100000             |
+ *
+ *      Examples with negative `self`:
+ *
+ *      | ndigits | Granularity | -1234.ceil(ndigits) |
+ *      |--------:|------------:|--------------------:|
+ *      | -1      | 10          | -1230               |
+ *      | -2      | 100         | -1200               |
+ *      | -3      | 1000        | -1000               |
+ *      | -4      | 10000       | 0                   |
+ *      | -5      | 100000      | 0                   |
  *
  *  Related: Integer#floor.
- *
  */
 
 static VALUE
@@ -6063,7 +6190,7 @@ int_s_try_convert(VALUE self, VALUE num)
  *
  * == What's Here
  *
- * First, what's elsewhere. \Class \Numeric:
+ * First, what's elsewhere. Class \Numeric:
  *
  * - Inherits from {class Object}[rdoc-ref:Object@What-27s+Here].
  * - Includes {module Comparable}[rdoc-ref:Comparable@What-27s+Here].
@@ -6162,10 +6289,8 @@ Init_Numeric(void)
     rb_include_module(rb_cNumeric, rb_mComparable);
     rb_define_method(rb_cNumeric, "coerce", num_coerce, 1);
     rb_define_method(rb_cNumeric, "clone", num_clone, -1);
-    rb_define_method(rb_cNumeric, "dup", num_dup, 0);
 
     rb_define_method(rb_cNumeric, "i", num_imaginary, 0);
-    rb_define_method(rb_cNumeric, "+@", num_uplus, 0);
     rb_define_method(rb_cNumeric, "-@", num_uminus, 0);
     rb_define_method(rb_cNumeric, "<=>", num_cmp, 1);
     rb_define_method(rb_cNumeric, "eql?", num_eql, 1);
@@ -6245,19 +6370,25 @@ Init_Numeric(void)
 
     rb_define_method(rb_cInteger, "digits", rb_int_digits, -1);
 
-    rb_fix_to_s_static[0] = rb_fstring_literal("0");
-    rb_fix_to_s_static[1] = rb_fstring_literal("1");
-    rb_fix_to_s_static[2] = rb_fstring_literal("2");
-    rb_fix_to_s_static[3] = rb_fstring_literal("3");
-    rb_fix_to_s_static[4] = rb_fstring_literal("4");
-    rb_fix_to_s_static[5] = rb_fstring_literal("5");
-    rb_fix_to_s_static[6] = rb_fstring_literal("6");
-    rb_fix_to_s_static[7] = rb_fstring_literal("7");
-    rb_fix_to_s_static[8] = rb_fstring_literal("8");
-    rb_fix_to_s_static[9] = rb_fstring_literal("9");
-    for(int i = 0; i < 10; i++) {
-        rb_gc_register_mark_object(rb_fix_to_s_static[i]);
-    }
+#define fix_to_s_static(n) do { \
+        VALUE lit = rb_fstring_literal(#n); \
+        rb_fix_to_s_static[n] = lit; \
+        rb_vm_register_global_object(lit); \
+        RB_GC_GUARD(lit); \
+    } while (0)
+
+    fix_to_s_static(0);
+    fix_to_s_static(1);
+    fix_to_s_static(2);
+    fix_to_s_static(3);
+    fix_to_s_static(4);
+    fix_to_s_static(5);
+    fix_to_s_static(6);
+    fix_to_s_static(7);
+    fix_to_s_static(8);
+    fix_to_s_static(9);
+
+#undef fix_to_s_static
 
     rb_cFloat  = rb_define_class("Float", rb_cNumeric);
 

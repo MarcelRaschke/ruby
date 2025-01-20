@@ -70,7 +70,7 @@ class TestSocket_TCPSocket < Test::Unit::TestCase
   end
 
   def test_initialize_connect_timeout
-    assert_raise(IO::TimeoutError, Errno::ENETUNREACH) do
+    assert_raise(IO::TimeoutError, Errno::ENETUNREACH, Errno::EACCES) do
       TCPSocket.new("192.0.2.1", 80, connect_timeout: 0)
     end
   end
@@ -141,167 +141,255 @@ class TestSocket_TCPSocket < Test::Unit::TestCase
     end
   end
 
-  def test_ai_addrconfig
-    # This test verifies that we pass AI_ADDRCONFIG to the DNS resolver when making
-    # an outgoing connection.
-    # The verification of this is unfortunately incredibly convoluted. We perform the
-    # test by setting up a fake DNS server to receive queries. Then, we construct
-    # an environment which has only IPv4 addresses and uses that fake DNS server. We
-    # then attempt to make an outgoing TCP connection. Finally, we verify that we
-    # only received A and not AAAA queries on our fake resolver.
-    # This test can only possibly work on Linux, and only when run as root. If either
-    # of these conditions aren't met, the test will be skipped.
+  def test_initialize_v6_hostname_resolved_earlier
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
 
-    # The construction of our IPv6-free environment must happen in a child process,
-    # which we can put in its own network & mount namespaces.
-
-    omit "This test is disabled.  It is retained to show the original intent of [ruby-core:110870]"
-
-    IO.popen("-") do |test_io|
-      if test_io.nil?
-        begin
-          # Child program
-          require 'fiddle'
-          require 'resolv'
-          require 'open3'
-
-          libc = Fiddle.dlopen(nil)
-          begin
-            unshare = Fiddle::Function.new(libc['unshare'], [Fiddle::TYPE_INT], Fiddle::TYPE_INT)
-          rescue Fiddle::DLError
-            # Test can't run because we don't have unshare(2) in libc
-            # This will be the case on not-linux, and also on very old glibc versions (or
-            # possibly other libc's that don't expose this syscall wrapper)
-            $stdout.write(Marshal.dump({result: :skip, reason: "unshare(2) or mount(2) not in libc"}))
-            exit
-          end
-
-          # Move our test process into a new network & mount namespace.
-          # This environment will be configured to be IPv6 free and point DNS resolution
-          # at a fake DNS server.
-          # (n.b. these flags are CLONE_NEWNS | CLONE_NEWNET)
-          ret = unshare.call(0x00020000 | 0x40000000)
-          errno = Fiddle.last_error
-          if ret == -1 && errno == Errno::EPERM::Errno
-            # Test can't run because we're not root.
-            $stdout.write(Marshal.dump({result: :skip, reason: "insufficient permissions to unshare namespaces"}))
-            exit
-          elsif ret == -1 && (errno == Errno::ENOSYS::Errno || errno == Errno::EINVAL::Errno)
-            # No unshare(2) in the kernel (or kernel too old to know about this namespace type)
-            $stdout.write(Marshal.dump({result: :skip, reason: "errno #{errno} calling unshare(2)"}))
-            exit
-          elsif ret == -1
-            # Unexpected failure
-            raise "errno #{errno} calling unshare(2)"
-          end
-
-          # Set up our fake DNS environment. Clean out /etc/hosts...
-          fake_hosts_file = Tempfile.new('ruby_test_hosts')
-          fake_hosts_file.write <<~HOSTS
-            127.0.0.1 localhost
-            ::1 localhost
-          HOSTS
-          fake_hosts_file.flush
-
-          # Have /etc/resolv.conf point to 127.0.0.1...
-          fake_resolv_conf = Tempfile.new('ruby_test_resolv')
-          fake_resolv_conf.write <<~RESOLV
-            nameserver 127.0.0.1
-          RESOLV
-          fake_resolv_conf.flush
-
-          # Also stub out /etc/nsswitch.conf; glibc can have other resolver modules
-          # (like systemd-resolved) configured in there other than just using dns,
-          # so rewrite it to remove any `hosts:` lines and add one which just uses
-          # dns.
-          real_nsswitch_conf = File.read('/etc/nsswitch.conf') rescue ""
-          fake_nsswitch_conf = Tempfile.new('ruby_test_nsswitch')
-          real_nsswitch_conf.lines.reject { _1 =~ /^\s*hosts:/ }.each do |ln|
-            fake_nsswitch_conf.puts ln
-          end
-          fake_nsswitch_conf.puts "hosts: files myhostname dns"
-          fake_nsswitch_conf.flush
-
-          # This is needed to make sure our bind-mounds aren't visible outside this process.
-          system 'mount', '--make-rprivate', '/', exception: true
-          # Bind-mount the fake files over the top of the real files.
-          system 'mount', '--bind', '--make-private', fake_hosts_file.path, '/etc/hosts', exception: true
-          system 'mount', '--bind', '--make-private', fake_resolv_conf.path, '/etc/resolv.conf', exception: true
-          system 'mount', '--bind', '--make-private', fake_nsswitch_conf.path, '/etc/nsswitch.conf', exception: true
-
-          # Create a dummy interface with only an IPv4 address
-          system 'ip', 'link', 'add', 'dummy0', 'type', 'dummy', exception: true
-          system 'ip', 'addr', 'add', '192.168.1.2/24', 'dev', 'dummy0', exception: true
-          system 'ip', 'link', 'set', 'dummy0', 'up', exception: true
-          system 'ip', 'link', 'set', 'lo', 'up', exception: true
-
-          # Disable IPv6 on this interface (this is needed to disable the link-local
-          # IPv6 address)
-          File.open('/proc/sys/net/ipv6/conf/dummy0/disable_ipv6', 'w') do |f|
-            f.puts "1"
-          end
-
-          # Create a fake DNS server which will receive the DNS queries triggered by TCPSocket.new
-          fake_dns_server_socket = UDPSocket.new
-          fake_dns_server_socket.bind('127.0.0.1', 53)
-          received_dns_queries = []
-          fake_dns_server_thread = Thread.new do
-            Socket.udp_server_loop_on([fake_dns_server_socket]) do |msg, msg_src|
-              request = Resolv::DNS::Message.decode(msg)
-              received_dns_queries << request
-              response = request.dup.tap do |r|
-                r.qr = 0
-                r.rcode = 3 # NXDOMAIN
-              end
-              msg_src.reply response.encode
-            end
-          end
-
-          # Make a request which will hit our fake DNS swerver - this needs to be in _another_
-          # process because glibc will cache resolver info across the fork otherwise.
-          load_path_args = $LOAD_PATH.flat_map { ['-I', _1] }
-          Open3.capture3('/proc/self/exe', *load_path_args, '-rsocket', '-e', <<~RUBY)
-            TCPSocket.open('www.example.com', 4444)
-          RUBY
-
-          fake_dns_server_thread.kill
-          fake_dns_server_thread.join
-
-          have_aaaa_qs = received_dns_queries.any? do |query|
-            query.question.any? do |question|
-              question[1] == Resolv::DNS::Resource::IN::AAAA
-            end
-          end
-
-          have_a_q = received_dns_queries.any? do |query|
-            query.question.any? do |question|
-              question[0].to_s == "www.example.com"
-            end
-          end
-
-          if have_aaaa_qs
-            $stdout.write(Marshal.dump({result: :fail, reason: "got AAAA queries, expected none"}))
-          elsif !have_a_q
-            $stdout.write(Marshal.dump({result: :fail, reason: "got no A query for example.com"}))
-          else
-            $stdout.write(Marshal.dump({result: :success}))
-          end
-        rescue => ex
-          $stdout.write(Marshal.dump({result: :fail, reason: ex.full_message}))
-        ensure
-          # Make sure the child process does not transfer control back into the test runner.
-          exit!
-        end
-      else
-        test_result = Marshal.load(test_io.read)
-
-        case test_result[:result]
-        when :skip
-          omit test_result[:reason]
-        when :fail
-          fail test_result[:reason]
-        end
-      end
+    begin
+      # Verify that "localhost" can be resolved to an IPv6 address
+      Socket.getaddrinfo("localhost", 0, Socket::AF_INET6)
+      server = TCPServer.new("::1", 0)
+    rescue Socket::ResolutionError, Errno::EADDRNOTAVAIL # IPv6 is not supported
+      return
     end
+
+    server_thread = Thread.new { server.accept }
+    port = server.addr[1]
+
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv4: 1000 } }
+    )
+    assert_true(socket.remote_address.ipv6?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v4_hostname_resolved_earlier
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+
+    server_thread = Thread.new { server.accept }
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv6: 1000 } }
+    )
+    assert_true(socket.remote_address.ipv4?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v6_hostname_resolved_in_resolution_delay
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    begin
+      # Verify that "localhost" can be resolved to an IPv6 address
+      Socket.getaddrinfo("localhost", 0, Socket::AF_INET6)
+      server = TCPServer.new("::1", 0)
+    rescue Socket::ResolutionError, Errno::EADDRNOTAVAIL # IPv6 is not supported
+      return
+    end
+
+    port = server.addr[1]
+    delay_time = 25 # Socket::RESOLUTION_DELAY (private) is 50ms
+
+    server_thread = Thread.new { server.accept }
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv6: delay_time } }
+    )
+    assert_true(socket.remote_address.ipv6?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v6_hostname_resolved_earlier_and_v6_server_is_not_listening
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    ipv4_address = "127.0.0.1"
+    server = Socket.new(Socket::AF_INET, :STREAM)
+    server.bind(Socket.pack_sockaddr_in(0, ipv4_address))
+    port = server.connect_address.ip_port
+
+    server_thread = Thread.new { server.listen(1); server.accept }
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv4: 10 } }
+    )
+    assert_equal(ipv4_address, socket.remote_address.ip_address)
+  ensure
+    accepted, _ = server_thread&.value
+    accepted&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v6_hostname_resolved_later_and_v6_server_is_not_listening
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = Socket.new(Socket::AF_INET, :STREAM)
+    server.bind(Socket.pack_sockaddr_in(0, "127.0.0.1"))
+    port = server.connect_address.ip_port
+
+    server_thread = Thread.new { server.listen(1); server.accept }
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv6: 25 } }
+    )
+    assert_true(socket.remote_address.ipv4?)
+  ensure
+    accepted, _ = server_thread&.value
+    accepted&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v6_hostname_resolution_failed_and_v4_hostname_resolution_is_success
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.addr[1]
+
+    server_thread = Thread.new { server.accept }
+    socket = TCPSocket.new(
+      "localhost",
+      port,
+      fast_fallback: true,
+      test_mode_settings: { delay: { ipv4: 10 }, error: { ipv6: Socket::EAI_FAIL } }
+    )
+    assert_true(socket.remote_address.ipv4?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_resolv_timeout_with_connection_failure
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    begin
+      server = TCPServer.new("::1", 0)
+    rescue Errno::EADDRNOTAVAIL # IPv6 is not supported
+      return
+    end
+
+    port = server.connect_address.ip_port
+    server.close
+
+    assert_raise(Errno::ETIMEDOUT) do
+      TCPSocket.new(
+        "localhost",
+        port,
+        resolv_timeout: 0.01,
+        fast_fallback: true,
+        test_mode_settings: { delay: { ipv4: 1000 } }
+      )
+    end
+  end
+
+  def test_initialize_with_hostname_resolution_failure_after_connection_failure
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    begin
+      server = TCPServer.new("::1", 0)
+    rescue Errno::EADDRNOTAVAIL # IPv6 is not supported
+      return
+    end
+
+    port = server.connect_address.ip_port
+    server.close
+
+    assert_raise(Socket::ResolutionError) do
+      TCPSocket.new(
+        "localhost",
+        port,
+        fast_fallback: true,
+        test_mode_settings: { delay: { ipv4: 100 }, error: { ipv4: Socket::EAI_FAIL } }
+      )
+    end
+  end
+
+  def test_initialize_with_connection_failure_after_hostname_resolution_failure
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.connect_address.ip_port
+    server.close
+
+    assert_raise(Errno::ECONNREFUSED) do
+      TCPSocket.new(
+        "localhost",
+        port,
+        fast_fallback: true,
+        test_mode_settings: { delay: { ipv4: 100 }, error: { ipv6: Socket::EAI_FAIL } }
+      )
+    end
+  end
+
+  def test_initialize_v6_connected_socket_with_v6_address
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    begin
+      server = TCPServer.new("::1", 0)
+    rescue Errno::EADDRNOTAVAIL # IPv6 is not supported
+      return
+    end
+
+    server_thread = Thread.new { server.accept }
+    port = server.addr[1]
+
+    socket = TCPSocket.new("::1", port)
+    assert_true(socket.remote_address.ipv6?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_v4_connected_socket_with_v4_address
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = TCPServer.new("127.0.0.1", 0)
+    server_thread = Thread.new { server.accept }
+    port = server.addr[1]
+
+    socket = TCPSocket.new("127.0.0.1", port)
+    assert_true(socket.remote_address.ipv4?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
+  end
+
+  def test_initialize_fast_fallback_is_false
+    return if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+
+    server = TCPServer.new("127.0.0.1", 0)
+    _, port, = server.addr
+    server_thread = Thread.new { server.accept }
+
+    socket = TCPSocket.new("127.0.0.1", port, fast_fallback: false)
+    assert_true(socket.remote_address.ipv4?)
+  ensure
+    server_thread&.value&.close
+    server&.close
+    socket&.close
   end
 end if defined?(TCPSocket)

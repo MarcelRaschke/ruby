@@ -23,7 +23,7 @@ VALUE mPsych;
 void Init_psych(void)
 {
     #ifdef HAVE_RB_EXT_RACTOR_SAFE
-	RB_EXT_RACTOR_SAFE(true);
+        RB_EXT_RACTOR_SAFE(true);
     #endif
     mPsych = rb_define_module("Psych");
 
@@ -34,4 +34,3 @@ void Init_psych(void)
     Init_psych_to_ruby();
     Init_psych_yaml_tree();
 }
-/* vim: set noet sws=4 sw=4: */

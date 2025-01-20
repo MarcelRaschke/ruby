@@ -1,4 +1,4 @@
-# frozen_string_literal: false
+# frozen_string_literal: true
 #
 #   irb/input-method.rb - input methods used irb
 #   	by Keiju ISHITSUKA(keiju@ruby-lang.org)
@@ -20,7 +20,7 @@ module IRB
     #
     # See IO#gets for more information.
     def gets
-      fail NotImplementedError, "gets"
+      fail NotImplementedError
     end
     public :gets
 
@@ -44,6 +44,10 @@ module IRB
       false
     end
 
+    def prompting?
+      false
+    end
+
     # For debug message
     def inspect
       'Abstract InputMethod'
@@ -63,6 +67,9 @@ module IRB
     #
     # See IO#gets for more information.
     def gets
+      # Workaround for debug compatibility test https://github.com/ruby/debug/pull/1100
+      puts if ENV['RUBY_DEBUG_TEST_UI']
+
       print @prompt
       line = @stdin.gets
       @line[@line_no += 1] = line
@@ -89,6 +96,10 @@ module IRB
     # See IO#eof for more information.
     def readable_after_eof?
       true
+    end
+
+    def prompting?
+      STDIN.tty?
     end
 
     # Returns the current line number for #io.
@@ -162,11 +173,13 @@ module IRB
   end
 
   class ReadlineInputMethod < StdioInputMethod
-    def self.initialize_readline
-      require "readline"
-    rescue LoadError
-    else
-      include ::Readline
+    class << self
+      def initialize_readline
+        require "readline"
+      rescue LoadError
+      else
+        include ::Readline
+      end
     end
 
     include HistorySavingAbility
@@ -220,6 +233,10 @@ module IRB
       @eof
     end
 
+    def prompting?
+      true
+    end
+
     # For debug message
     def inspect
       readline_impl = (defined?(Reline) && Readline == Reline) ? 'Reline' : 'ext/readline'
@@ -250,18 +267,9 @@ module IRB
         @completion_params = [preposing, target, postposing, bind]
         @completor.completion_candidates(preposing, target, postposing, bind: bind)
       }
-      Reline.output_modifier_proc =
-        if IRB.conf[:USE_COLORIZE]
-          proc do |output, complete: |
-            next unless IRB::Color.colorable?
-            lvars = IRB.CurrentContext&.local_variables || []
-            IRB::Color.colorize_code(output, complete: complete, local_variables: lvars)
-          end
-        else
-          proc do |output|
-            Reline::Unicode.escape_for_print(output)
-          end
-        end
+      Reline.output_modifier_proc = proc do |input, complete:|
+        IRB.CurrentContext.colorize_input(input, complete: complete)
+      end
       Reline.dig_perfect_match_proc = ->(matched) { display_document(matched) }
       Reline.autocompletion = IRB.conf[:USE_AUTOCOMPLETE]
 
@@ -296,15 +304,30 @@ module IRB
       @completor.doc_namespace(preposing, matched, postposing, bind: bind)
     end
 
+    def rdoc_ri_driver
+      return @rdoc_ri_driver if defined?(@rdoc_ri_driver)
+
+      begin
+        require 'rdoc'
+      rescue LoadError
+        @rdoc_ri_driver = nil
+      else
+        options = {}
+        options[:extra_doc_dirs] = IRB.conf[:EXTRA_DOC_DIRS] unless IRB.conf[:EXTRA_DOC_DIRS].empty?
+        @rdoc_ri_driver = RDoc::RI::Driver.new(options)
+      end
+    end
+
     def show_doc_dialog_proc
       input_method = self # self is changed in the lambda below.
       ->() {
         dialog.trap_key = nil
         alt_d = [
-          [Reline::Key.new(nil, 0xE4, true)], # Normal Alt+d.
           [27, 100], # Normal Alt+d when convert-meta isn't used.
-          [195, 164], # The "ä" that appears when Alt+d is pressed on xterm.
-          [226, 136, 130] # The "∂" that appears when Alt+d in pressed on iTerm2.
+          # When option/alt is not configured as a meta key in terminal emulator,
+          # option/alt + d will send a unicode character depend on OS keyboard setting.
+          [195, 164], # "ä" in somewhere (FIXME: environment information is unknown).
+          [226, 136, 130] # "∂" Alt+d on Mac keyboard.
         ]
 
         if just_cursor_moving and completion_journey_data.nil?
@@ -319,17 +342,21 @@ module IRB
 
         show_easter_egg = name&.match?(/\ARubyVM/) && !ENV['RUBY_YES_I_AM_NOT_A_NORMAL_USER']
 
-        options = {}
-        options[:extra_doc_dirs] = IRB.conf[:EXTRA_DOC_DIRS] unless IRB.conf[:EXTRA_DOC_DIRS].empty?
-        driver = RDoc::RI::Driver.new(options)
+        driver = input_method.rdoc_ri_driver
 
         if key.match?(dialog.name)
           if show_easter_egg
             IRB.__send__(:easter_egg)
           else
+            # RDoc::RI::Driver#display_names uses pager command internally.
+            # Some pager command like `more` doesn't use alternate screen
+            # so we need to turn on and off alternate screen manually.
             begin
+              print "\e[?1049h"
               driver.display_names([name])
             rescue RDoc::RI::Driver::NotFoundError
+            ensure
+              print "\e[?1049l"
             end
           end
         end
@@ -409,12 +436,9 @@ module IRB
       }
     end
 
-    def display_document(matched, driver: nil)
-      begin
-        require 'rdoc'
-      rescue LoadError
-        return
-      end
+    def display_document(matched)
+      driver = rdoc_ri_driver
+      return unless driver
 
       if matched =~ /\A(?:::)?RubyVM/ and not ENV['RUBY_YES_I_AM_NOT_A_NORMAL_USER']
         IRB.__send__(:easter_egg)
@@ -424,7 +448,6 @@ module IRB
       namespace = retrieve_doc_namespace(matched)
       return unless namespace
 
-      driver ||= RDoc::RI::Driver.new
       if namespace.is_a?(Array)
         out = RDoc::Markup::Document.new
         namespace.each do |m|
@@ -465,6 +488,10 @@ module IRB
     # See IO#eof? for more information.
     def eof?
       @eof
+    end
+
+    def prompting?
+      true
     end
 
     # For debug message

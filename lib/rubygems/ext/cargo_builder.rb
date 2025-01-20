@@ -16,9 +16,14 @@ class Gem::Ext::CargoBuilder < Gem::Ext::Builder
     @profile = :release
   end
 
-  def build(extension, dest_path, results, args = [], lib_dir = nil, cargo_dir = Dir.pwd)
+  def build(extension, dest_path, results, args = [], lib_dir = nil, cargo_dir = Dir.pwd,
+    target_rbconfig=Gem.target_rbconfig)
     require "tempfile"
     require "fileutils"
+
+    if target_rbconfig.path
+      warn "--target-rbconfig is not yet supported for Rust extensions. Ignoring"
+    end
 
     # Where's the Cargo.toml of the crate we're building
     cargo_toml = File.join(cargo_dir, "Cargo.toml")
@@ -47,7 +52,6 @@ class Gem::Ext::CargoBuilder < Gem::Ext::Builder
 
       nesting = extension_nesting(extension)
 
-      # TODO: remove in RubyGems 4
       if Gem.install_extension_in_lib && lib_dir
         nested_lib_dir = File.join(lib_dir, nesting)
         FileUtils.mkdir_p nested_lib_dir
@@ -185,6 +189,7 @@ class Gem::Ext::CargoBuilder < Gem::Ext::Builder
   end
 
   def cargo_dylib_path(dest_path, crate_name)
+    so_ext = RbConfig::CONFIG["SOEXT"]
     prefix = so_ext == "dll" ? "" : "lib"
     path_parts = [dest_path]
     path_parts << ENV["CARGO_BUILD_TARGET"] if ENV["CARGO_BUILD_TARGET"]
@@ -247,8 +252,7 @@ EOF
 
   def rustc_dynamic_linker_flags(dest_dir, crate_name)
     split_flags("DLDFLAGS").
-      map {|arg| maybe_resolve_ldflag_variable(arg, dest_dir, crate_name) }.
-      compact.
+      filter_map {|arg| maybe_resolve_ldflag_variable(arg, dest_dir, crate_name) }.
       flat_map {|arg| ldflag_to_link_modifier(arg) }
   end
 
@@ -293,7 +297,7 @@ EOF
 
     case var_name
     # On windows, it is assumed that mkmf has setup an exports file for the
-    # extension, so we have to to create one ourselves.
+    # extension, so we have to create one ourselves.
     when "DEFFILE"
       write_deffile(dest_dir, crate_name)
     else
@@ -311,22 +315,6 @@ EOF
     end
 
     deffile_path
-  end
-
-  # We have to basically reimplement <code>RbConfig::CONFIG['SOEXT']</code> here to support
-  # Ruby < 2.5
-  #
-  # @see https://github.com/ruby/ruby/blob/c87c027f18c005460746a74c07cd80ee355b16e4/configure.ac#L3185
-  def so_ext
-    return RbConfig::CONFIG["SOEXT"] if RbConfig::CONFIG.key?("SOEXT")
-
-    if win_target?
-      "dll"
-    elsif darwin_target?
-      "dylib"
-    else
-      "so"
-    end
   end
 
   # Corresponds to $(LIBPATH) in mkmf

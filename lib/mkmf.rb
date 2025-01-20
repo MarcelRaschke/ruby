@@ -44,6 +44,23 @@ end
 # correctly compile and link the C extension to Ruby and a third-party
 # library.
 module MakeMakefile
+
+  target_rbconfig = nil
+  ARGV.delete_if do |arg|
+    opt = arg.delete_prefix("--target-rbconfig=")
+    unless opt == arg
+      target_rbconfig = opt
+    end
+  end
+  if target_rbconfig
+    # Load the RbConfig for the target platform into this module.
+    # Cross-compiling needs the same version of Ruby.
+    Kernel.load target_rbconfig, self
+  else
+    # The RbConfig for the target platform where the built extension runs.
+    RbConfig = ::RbConfig
+  end
+
   #### defer until this module become global-state free.
   # def self.extended(obj)
   #   obj.init_mkmf
@@ -399,6 +416,11 @@ MESSAGE
       env, *commands = commands if Hash === commands.first
       envs.merge!(env) if env
     end
+
+    # disable ASAN leak reporting - conftest programs almost always don't bother
+    # to free their memory.
+    envs['ASAN_OPTIONS'] = "detect_leaks=0" unless ENV.key?('ASAN_OPTIONS')
+
     return envs, expand[commands]
   end
 
@@ -561,14 +583,15 @@ MSG
   end
 
   def libpathflag(libpath=$DEFLIBPATH|$LIBPATH)
+    libpathflags = nil
     libpath.map{|x|
       case x
       when "$(topdir)", /\A\./
         LIBPATHFLAG
       else
-        LIBPATHFLAG+RPATHFLAG
+        libpathflags ||= [LIBPATHFLAG, RPATHFLAG].grep(/\S/).join(" ")
       end % x.quote
-    }.join
+    }.join(" ")
   end
 
   def werror_flag(opt = nil)
@@ -581,9 +604,9 @@ MSG
     yield(opt, opts)
   end
 
-  def try_link0(src, opt = "", **opts, &b) # :nodoc:
+  def try_link0(src, opt = "", ldflags: "", **opts, &b) # :nodoc:
     exe = CONFTEST+$EXEEXT
-    cmd = link_command("", opt)
+    cmd = link_command(ldflags, opt)
     if $universal
       require 'tmpdir'
       Dir.mktmpdir("mkmf_", oldtmpdir = ENV["TMPDIR"]) do |tmpdir|
@@ -727,7 +750,7 @@ MSG
 
   # :nodoc:
   def try_ldflags(flags, werror: $mswin, **opts)
-    try_link(MAIN_DOES_NOTHING, flags, werror: werror, **opts)
+    try_link(MAIN_DOES_NOTHING, "", ldflags: flags, werror: werror, **opts)
   end
 
   # :startdoc:
@@ -1945,7 +1968,7 @@ SRC
       if pkgconfig = with_config("#{pkg}-config") and find_executable0(pkgconfig)
       # if and only if package specific config command is given
       elsif ($PKGCONFIG ||=
-             (pkgconfig = with_config("pkg-config") {config_string("PKG_CONFIG") || "pkg-config"}) &&
+             (pkgconfig = with_config("pkg-config") {config_string("PKG_CONFIG") || ENV["PKG_CONFIG"] || "pkg-config"}) &&
              find_executable0(pkgconfig) && pkgconfig) and
            xsystem([*envs, $PKGCONFIG, "--exists", pkg])
         # default to pkg-config command
@@ -1961,7 +1984,20 @@ SRC
           opts = Array(opts).map { |o| "--#{o}" }
           opts = xpopen([*envs, pkgconfig, *opts, *args], err:[:child, :out], &:read)
           Logging.open {puts opts.each_line.map{|s|"=> #{s.inspect}"}}
-          opts.strip if $?.success?
+          if $?.success?
+            opts = opts.strip
+            libarg, libpath = LIBARG, LIBPATHFLAG.strip
+            opts = opts.shellsplit.map { |s|
+              if s.start_with?('-l')
+                libarg % s[2..]
+              elsif s.start_with?('-L')
+                libpath % s[2..]
+              else
+                s
+              end
+            }.quote.join(" ")
+            opts
+          end
         }
       end
       orig_ldflags = $LDFLAGS
@@ -2143,7 +2179,9 @@ ARCH_FLAG = #{$ARCH_FLAG}
 DLDFLAGS = $(ldflags) $(dldflags) $(ARCH_FLAG)
 LDSHARED = #{CONFIG['LDSHARED']}
 LDSHAREDXX = #{config_string('LDSHAREDXX') || '$(LDSHARED)'}
+POSTLINK = #{config_string('POSTLINK', RbConfig::CONFIG)}
 AR = #{CONFIG['AR']}
+LD = #{CONFIG['LD']}
 EXEEXT = #{CONFIG['EXEEXT']}
 
 }
@@ -2343,6 +2381,19 @@ RULES
   # directory, i.e. the current directory.  It is included as part of the
   # +VPATH+ and added to the list of +INCFLAGS+.
   #
+  # Yields the configuration part of the makefile to be generated, as an array
+  # of strings, if the block is given.  The returned value will be used the
+  # new configuration part.
+  #
+  #   create_makefile('foo') {|conf|
+  #     [
+  #       *conf,
+  #       "MACRO_YOU_NEED = something",
+  #     ]
+  #   }
+  #
+  # If "depend" file exist in the source directory, that content will be
+  # included in the generated makefile, with formatted by depend_rules method.
   def create_makefile(target, srcprefix = nil)
     $target = target
     libpath = $DEFLIBPATH|$LIBPATH
@@ -2509,6 +2560,7 @@ static: #{$extmk && !$static ? "all" : %[$(STATIC_LIB)#{$extout ? " install-rb" 
         mfile.puts dest
         mfile.print "clean-so::\n"
         mfile.print "\t-$(Q)$(RM) #{fseprepl[dest]} #{fseprepl[stamp]}\n"
+        mfile.print "\t-$(Q)$(RM_RF) #{fseprepl['$(CLEANLIBS)']}\n"
         mfile.print "\t-$(Q)$(RMDIRS) #{fseprepl[dir]}#{$ignore_error}\n"
       else
         mfile.print "#{f} #{stamp}\n"
@@ -2881,7 +2933,7 @@ MESSAGE
   ##
   # Argument which will add a library path to the linker
 
-  LIBPATHFLAG = config_string('LIBPATHFLAG') || ' -L%s'
+  LIBPATHFLAG = config_string('LIBPATHFLAG') || '-L%s'
 
   ##
   # Argument which will add a runtime library path to the linker

@@ -1,18 +1,22 @@
+# frozen_string_literal: true
+
 require "strscan"
-require "lrama/lexer/grammar_file"
-require "lrama/lexer/location"
-require "lrama/lexer/token"
+
+require_relative "lexer/grammar_file"
+require_relative "lexer/location"
+require_relative "lexer/token"
 
 module Lrama
   class Lexer
     attr_reader :head_line, :head_column, :line
     attr_accessor :status, :end_symbol
 
-    SYMBOLS = ['%{', '%}', '%%', '{', '}', '\[', '\]', '\(', '\)', '\,', ':', '\|', ';']
+    SYMBOLS = ['%{', '%}', '%%', '{', '}', '\[', '\]', '\(', '\)', '\,', ':', '\|', ';'].freeze
     PERCENT_TOKENS = %w(
       %union
       %token
       %type
+      %nterm
       %left
       %right
       %nonassoc
@@ -20,16 +24,25 @@ module Lrama
       %define
       %require
       %printer
+      %destructor
       %lex-param
       %parse-param
       %initial-action
       %precedence
       %prec
       %error-token
+      %before-reduce
+      %after-reduce
+      %after-shift-error-token
+      %after-shift
+      %after-pop-stack
       %empty
       %code
       %rule
-    )
+      %no-stdlib
+      %inline
+      %locations
+    ).freeze
 
     def initialize(grammar_file)
       @grammar_file = grammar_file
@@ -62,7 +75,7 @@ module Lrama
     end
 
     def lex_token
-      while !@scanner.eos? do
+      until @scanner.eos? do
         case
         when @scanner.scan(/\n/)
           newline
@@ -117,7 +130,7 @@ module Lrama
       code = ''
       reset_first_position
 
-      while !@scanner.eos? do
+      until @scanner.eos? do
         case
         when @scanner.scan(/{/)
           code += @scanner.matched
@@ -154,7 +167,7 @@ module Lrama
     private
 
     def lex_comment
-      while !@scanner.eos? do
+      until @scanner.eos? do
         case
         when @scanner.scan(/\n/)
           newline

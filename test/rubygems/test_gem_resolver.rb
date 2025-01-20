@@ -8,7 +8,7 @@ class TestGemResolver < Gem::TestCase
   end
 
   def set(*specs)
-    source = Gem::Source.new URI @gem_repo
+    source = Gem::Source.new Gem::URI @gem_repo
 
     specs = specs.map do |spec|
       Gem::Resolver::SpecSpecification.new nil, spec, source
@@ -571,7 +571,7 @@ class TestGemResolver < Gem::TestCase
 
   def test_raises_and_reports_an_implicit_request_properly
     a1 = util_spec "a", "1" do |s|
-      s.add_runtime_dependency "b", "= 2"
+      s.add_dependency "b", "= 2"
     end
 
     ad = make_dep "a", "= 1"

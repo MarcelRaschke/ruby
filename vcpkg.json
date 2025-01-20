@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "dependencies": [
+    "libffi",
+    "libyaml",
+    "openssl",
+    "zlib"
+  ],
+  "builtin-baseline": "65be7019941e1401e02daaba0738cab2c8a4a355"
+}

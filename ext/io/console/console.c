@@ -4,7 +4,7 @@
  */
 
 static const char *const
-IO_CONSOLE_VERSION = "0.7.2";
+IO_CONSOLE_VERSION = "0.8.0";
 
 #include "ruby.h"
 #include "ruby/io.h"
@@ -81,8 +81,13 @@ getattr(int fd, conmode *t)
 
 #define CSI "\x1b\x5b"
 
-static ID id_getc, id_console, id_close;
+static ID id_getc, id_close;
 static ID id_gets, id_flush, id_chomp_bang;
+
+#ifndef HAVE_RB_INTERNED_STR_CSTR
+# define rb_str_to_interned_str(str) rb_str_freeze(str)
+# define rb_interned_str_cstr(str) rb_str_freeze(rb_usascii_str_new_cstr(str))
+#endif
 
 #if defined HAVE_RUBY_FIBER_SCHEDULER_H
 # include "ruby/fiber/scheduler.h"
@@ -125,7 +130,14 @@ io_get_write_io_fallback(VALUE io)
 #define rb_io_get_write_io io_get_write_io_fallback
 #endif
 
-#define sys_fail(io) rb_sys_fail_str(rb_io_path(io))
+#ifndef DHAVE_RB_SYSERR_FAIL_STR
+# define rb_syserr_fail_str(e, mesg) rb_exc_raise(rb_syserr_new_str(e, mesg))
+#endif
+
+#define sys_fail(io) do { \
+    int err = errno; \
+    rb_syserr_fail_str(err, rb_io_path(io)); \
+} while (0)
 
 #ifndef HAVE_RB_F_SEND
 #ifndef RB_PASS_CALLED_KEYWORDS
@@ -1071,6 +1083,9 @@ console_scroll(VALUE io, int line)
     return io;
 }
 
+#define GPERF_DOWNCASE 1
+#define GPERF_CASE_STRCMP 1
+#define gperf_case_strcmp STRCASECMP
 #include "win32_vk.inc"
 
 /*
@@ -1535,10 +1550,8 @@ console_clear_screen(VALUE io)
 static VALUE
 io_open_descriptor_fallback(VALUE klass, int descriptor, int mode, VALUE path, VALUE timeout, void *encoding)
 {
-    rb_update_max_fd(descriptor);
-
     VALUE arguments[2] = {
-        INT2NUM(descriptor),
+        (rb_update_max_fd(descriptor), INT2NUM(descriptor)),
         INT2FIX(mode),
     };
 
@@ -1561,6 +1574,62 @@ rb_io_closed_p(VALUE io)
     rb_io_t *fptr = RFILE(io)->fptr;
     return fptr->fd == -1 ? Qtrue : Qfalse;
 }
+#endif
+
+#if defined(RB_EXT_RACTOR_SAFE) && defined(HAVE_RB_RACTOR_LOCAL_STORAGE_VALUE_NEWKEY)
+# define USE_RACTOR_STORAGE 1
+#else
+# define USE_RACTOR_STORAGE 0
+#endif
+
+#if USE_RACTOR_STORAGE
+#include "ruby/ractor.h"
+static rb_ractor_local_key_t key_console_dev;
+
+static bool
+console_dev_get(VALUE klass, VALUE *dev)
+{
+    return rb_ractor_local_storage_value_lookup(key_console_dev, dev);
+}
+
+static void
+console_dev_set(VALUE klass, VALUE value)
+{
+    rb_ractor_local_storage_value_set(key_console_dev, value);
+}
+
+static void
+console_dev_remove(VALUE klass)
+{
+    console_dev_set(klass, Qnil);
+}
+
+#else
+
+static ID id_console;
+
+static int
+console_dev_get(VALUE klass, VALUE *dev)
+{
+    if (rb_const_defined(klass, id_console)) {
+	*dev = rb_const_get(klass, id_console);
+	return 1;
+    }
+    return 0;
+}
+
+static void
+console_dev_set(VALUE klass, VALUE value)
+{
+    rb_const_set(klass, id_console, value);
+}
+
+static void
+console_dev_remove(VALUE klass)
+{
+    rb_const_remove(klass, id_console);
+}
+
 #endif
 
 /*
@@ -1591,10 +1660,9 @@ console_dev(int argc, VALUE *argv, VALUE klass)
     // Force the class to be File.
     if (klass == rb_cIO) klass = rb_cFile;
 
-    if (rb_const_defined(klass, id_console)) {
-        con = rb_const_get(klass, id_console);
+    if (console_dev_get(klass, &con)) {
         if (!RB_TYPE_P(con, T_FILE) || RTEST(rb_io_closed_p(con))) {
-            rb_const_remove(klass, id_console);
+	    console_dev_remove(klass);
             con = 0;
         }
     }
@@ -1603,7 +1671,7 @@ console_dev(int argc, VALUE *argv, VALUE klass)
         if (sym == ID2SYM(id_close) && argc == 1) {
             if (con) {
                 rb_io_close(con);
-                rb_const_remove(klass, id_console);
+                console_dev_remove(klass);
                 con = 0;
             }
             return Qnil;
@@ -1623,7 +1691,6 @@ console_dev(int argc, VALUE *argv, VALUE klass)
 #endif
 #ifdef CONSOLE_DEVICE_FOR_WRITING
         VALUE out;
-        rb_io_t *ofptr;
 #endif
         int fd;
         VALUE path = rb_obj_freeze(rb_str_new2(CONSOLE_DEVICE));
@@ -1645,7 +1712,7 @@ console_dev(int argc, VALUE *argv, VALUE klass)
 #ifdef CONSOLE_DEVICE_FOR_WRITING
         rb_io_set_write_io(con, out);
 #endif
-        rb_const_set(klass, id_console, con);
+        console_dev_set(klass, con);
     }
 
     if (sym) {
@@ -1756,18 +1823,81 @@ io_getpass(int argc, VALUE *argv, VALUE io)
     return str_chomp(str);
 }
 
+#if defined(_WIN32) || defined(HAVE_TTYNAME_R) || defined(HAVE_TTYNAME)
+/*
+ * call-seq:
+ *   io.ttyname       -> string or nil
+ *
+ * Returns name of associated terminal (tty) if +io+ is not a tty.
+ * Returns +nil+ otherwise.
+ */
+static VALUE
+console_ttyname(VALUE io)
+{
+    int fd = rb_io_descriptor(io);
+    if (!isatty(fd)) return Qnil;
+# if defined _WIN32
+    return rb_usascii_str_new_lit("con");
+# elif defined HAVE_TTYNAME_R
+    {
+	char termname[1024], *tn = termname;
+	size_t size = sizeof(termname);
+	int e;
+	if (ttyname_r(fd, tn, size) == 0)
+	    return rb_interned_str_cstr(tn);
+	if ((e = errno) == ERANGE) {
+	    VALUE s = rb_str_new(0, size);
+	    while (1) {
+		tn = RSTRING_PTR(s);
+		size = rb_str_capacity(s);
+		if (ttyname_r(fd, tn, size) == 0) {
+		    return rb_str_to_interned_str(rb_str_resize(s, strlen(tn)));
+		}
+		if ((e = errno) != ERANGE) break;
+		if ((size *= 2) >= INT_MAX/2) break;
+		rb_str_resize(s, size);
+	    }
+	}
+	rb_syserr_fail_str(e, rb_sprintf("ttyname_r(%d)", fd));
+	UNREACHABLE_RETURN(Qnil);
+    }
+# elif defined HAVE_TTYNAME
+    {
+	const char *tn = ttyname(fd);
+	if (!tn) {
+	    int e = errno;
+	    rb_syserr_fail_str(e, rb_sprintf("ttyname(%d)", fd));
+	}
+	return rb_interned_str_cstr(tn);
+    }
+# else
+#   error No ttyname function
+# endif
+}
+#else
+# define console_ttyname rb_f_notimplement
+#endif
+
 /*
  * IO console methods
  */
 void
 Init_console(void)
 {
+#if USE_RACTOR_STORAGE
+    RB_EXT_RACTOR_SAFE(true);
+#endif
+
 #undef rb_intern
+#if USE_RACTOR_STORAGE
+    key_console_dev = rb_ractor_local_storage_value_newkey();
+#else
+    id_console = rb_intern("console");
+#endif
     id_getc = rb_intern("getc");
     id_gets = rb_intern("gets");
     id_flush = rb_intern("flush");
     id_chomp_bang = rb_intern("chomp!");
-    id_console = rb_intern("console");
     id_close = rb_intern("close");
 #define init_rawmode_opt_id(name) \
     rawmode_opt_ids[kwd_##name] = rb_intern(#name)
@@ -1815,6 +1945,7 @@ InitVM_console(void)
     rb_define_method(rb_cIO, "pressed?", console_key_pressed_p, 1);
     rb_define_method(rb_cIO, "check_winsize_changed", console_check_winsize_changed, 0);
     rb_define_method(rb_cIO, "getpass", console_getpass, -1);
+    rb_define_method(rb_cIO, "ttyname", console_ttyname, 0);
     rb_define_singleton_method(rb_cIO, "console", console_dev, -1);
     {
 	/* :stopdoc: */
@@ -1826,7 +1957,7 @@ InitVM_console(void)
     {
 	/* :stopdoc: */
         cConmode = rb_define_class_under(rb_cIO, "ConsoleMode", rb_cObject);
-        rb_define_const(cConmode, "VERSION", rb_str_new_cstr(IO_CONSOLE_VERSION));
+        rb_define_const(cConmode, "VERSION", rb_obj_freeze(rb_str_new_cstr(IO_CONSOLE_VERSION)));
         rb_define_alloc_func(cConmode, conmode_alloc);
         rb_undef_method(cConmode, "initialize");
         rb_define_method(cConmode, "initialize_copy", conmode_init_copy, 1);

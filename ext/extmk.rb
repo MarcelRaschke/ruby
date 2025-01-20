@@ -2,7 +2,13 @@
 # -*- mode: ruby; coding: us-ascii -*-
 # frozen_string_literal: false
 
-module Gem; end # only needs Gem::Platform
+module Gem
+  # Used by Gem::Platform.local
+  def self.target_rbconfig
+    RbConfig::CONFIG
+  end
+end
+# only needs Gem::Platform
 require 'rubygems/platform'
 
 # :stopdoc:
@@ -104,7 +110,7 @@ def extract_makefile(makefile, keep = true)
     end
     return false
   end
-  srcs = Dir[File.join($srcdir, "*.{#{SRC_EXT.join(%q{,})}}")].map {|fn| File.basename(fn)}.sort
+  srcs = Dir[*SRC_EXT.map {|e| "*.#{e}"}, base: $srcdir].map {|fn| File.basename(fn)}.sort
   if !srcs.empty?
     old_srcs = m[/^ORIG_SRCS[ \t]*=[ \t](.*)/, 1] or return false
     (old_srcs.split - srcs).empty? or return false
@@ -130,6 +136,14 @@ def extract_makefile(makefile, keep = true)
   $LOCAL_LIBS = m[/^LOCAL_LIBS[ \t]*=[ \t]*(.*)/, 1] || ""
   $LIBPATH = Shellwords.shellwords(m[/^libpath[ \t]*=[ \t]*(.*)/, 1] || "") - %w[$(libdir) $(topdir)]
   true
+end
+
+def create_makefile(target, srcprefix = nil)
+  if $static and target.include?("/")
+    base = File.basename(target)
+    $defs << "-DInit_#{base}=Init_#{target.tr('/', '_')}"
+  end
+  super
 end
 
 def extmake(target, basedir = 'ext', maybestatic = true)
@@ -472,12 +486,13 @@ if exts = ARGV.shift
   $extension = [exts] if exts
   if ext_prefix.start_with?('.')
     @gemname = exts
-  elsif exts
-    $static_ext.delete_if {|t, *| !File.fnmatch(t, exts)}
+    exts = []
+  else
+    exts &&= $static_ext.select {|t, *| File.fnmatch(t, exts)}
   end
 end
-ext_prefix = "#{$top_srcdir}/#{ext_prefix || 'ext'}"
-exts = $static_ext.sort_by {|t, i| i}.collect {|t, i| t}
+ext_prefix ||= 'ext'
+exts = (exts || $static_ext).sort_by {|t, i| i}.collect {|t, i| t}
 default_exclude_exts =
   case
   when $cygwin
@@ -490,28 +505,30 @@ default_exclude_exts =
 mandatory_exts = {}
 withes, withouts = [["--with", nil], ["--without", default_exclude_exts]].collect {|w, d|
   if !(w = %w[-extensions -ext].collect {|o|arg_config(w+o)}).any?
-    d ? proc {|c1| d.any?(&c1)} : proc {true}
+    d ? proc {|&c1| d.any?(&c1)} : proc {true}
   elsif (w = w.grep(String)).empty?
     proc {true}
   else
     w = w.collect {|o| o.split(/,/)}.flatten
     w.collect! {|o| o == '+' ? d : o}.flatten!
-    proc {|c1| w.any?(&c1)}
+    proc {|&c1| w.any?(&c1)}
   end
 }
 cond = proc {|ext, *|
-  withes.call(proc {|n|
-                !n or (mandatory_exts[ext] = true if File.fnmatch(n, ext))
-              }) and
-    !withouts.call(proc {|n| File.fnmatch(n, ext)})
+  withes.call {|n| !n or (mandatory_exts[ext] = true if File.fnmatch(n, ext))} and
+    !withouts.call {|n| File.fnmatch(n, ext)}
 }
 ($extension || %w[*]).each do |e|
   e = e.sub(/\A(?:\.\/)+/, '')
-  incl, excl = Dir.glob("#{ext_prefix}/#{e}/**/extconf.rb").collect {|d|
-    d = File.dirname(d)
-    d.slice!(0, ext_prefix.length + 1)
-    d
+  incl, excl = Dir.glob("#{e}/**/extconf.rb", base: "#$top_srcdir/#{ext_prefix}").collect {|d|
+    File.dirname(d)
   }.partition {|ext|
+    if @gemname
+      ext = ext[%r[\A[^/]+]] # extract gem name
+      Dir.glob("*.gemspec", base: "#$top_srcdir/#{ext_prefix}/#{ext}") do |g|
+        break ext = g if ext.start_with?("#{g.chomp!(".gemspec")}-")
+      end
+    end
     with_config(ext, &cond)
   }
   incl.sort!
@@ -522,7 +539,7 @@ cond = proc {|ext, *|
     exts.delete_if {|d| File.fnmatch?("-*", d)}
   end
 end
-ext_prefix = ext_prefix[$top_srcdir.size+1..-2]
+ext_prefix.chomp!("/")
 
 @ext_prefix = ext_prefix
 @inplace = inplace
@@ -545,7 +562,13 @@ extend Module.new {
   end
 
   def create_makefile(*args, &block)
-    return super unless @gemname
+    unless @gemname
+      if $static and (target = args.first).include?("/")
+        base = File.basename(target)
+        $defs << "-DInit_#{base}=Init_#{target.tr('/', '_')}"
+      end
+      return super
+    end
     super(*args) do |conf|
       conf.find do |s|
         s.sub!(%r(^(srcdir *= *)\$\(top_srcdir\)/\.bundle/gems/[^/]+(?=/))) {
@@ -561,7 +584,6 @@ extend Module.new {
         }
       end
 
-      gemlib = File.directory?("#{$top_srcdir}/#{@ext_prefix}/#{@gemname}/lib")
       if conf.any? {|s| /^TARGET *= *\S/ =~ s}
         conf << %{
 gem_platform = #{Gem::Platform.local}
@@ -594,23 +616,25 @@ gemspec: $(gemspec)
 
 clean-gemspec:
 	-$(Q)$(RM) $(gemspec)
-}
-
-        if gemlib
-          conf << %{
-install-rb: gemlib
-clean-rb:: clean-gemlib
 
 LN_S = #{config_string('LN_S')}
 CP_R = #{config_string('CP')} -r
-
-gemlib = $(TARGET_TOPDIR)/gems/$(gem)/lib
-gemlib:#{%{ $(gemlib)\n$(gemlib): $(gem_srcdir)/lib} if $nmake}
-	$(Q) #{@inplace ? '$(NULLCMD) ' : ''}$(RUBY) $(top_srcdir)/tool/ln_sr.rb -q -f -T $(gem_srcdir)/lib $(gemlib)
-
-clean-gemlib:
-	$(Q) $(#{@inplace ? 'NULLCMD' : 'RM_RF'}) $(gemlib)
 }
+        unless @inplace
+          %w[bin lib].each do |d|
+            next unless File.directory?("#{$top_srcdir}/#{@ext_prefix}/#{@gemname}/#{d}")
+            conf << %{
+install-rb: gem#{d}
+clean-rb:: clean-gem#{d}
+
+gem#{d} = $(TARGET_TOPDIR)/gems/$(gem)/#{d}
+gem#{d}:#{%{ $(gem#{d})\n$(gem#{d}): $(gem_srcdir)/#{d}} if $nmake}
+	$(Q) $(RUBY) $(top_srcdir)/tool/ln_sr.rb -q -f -T $(gem_srcdir)/#{d} $(gem#{d})
+
+clean-gem#{d}:
+	$(Q) $(RM_RF) $(gem#{d})
+}
+          end
         end
       end
 
@@ -628,7 +652,9 @@ $hdrdir = ($top_srcdir = relative_from(srcdir, $topdir = "..")) + "/include"
 extso = []
 fails = []
 exts.each do |d|
-  $static = $force_static ? true : $static_ext[d]
+  $static = $force_static ? true : $static_ext.fetch(d) do
+    $static_ext.any? {|t, | File.fnmatch?(t, d)}
+  end
 
   if !$nodynamic or $static
     result = extmake(d, ext_prefix, !@gemname) or abort
@@ -754,7 +780,6 @@ begin
     end
     submakeopts << 'EXTLDFLAGS="$(EXTLDFLAGS)"'
     submakeopts << 'EXTINITS="$(EXTINITS)"'
-    submakeopts << 'UPDATE_LIBRARIES="$(UPDATE_LIBRARIES)"'
     submakeopts << 'SHOWFLAGS='
     mf.macro "SUBMAKEOPTS", submakeopts
     mf.macro "NOTE_MESG", %w[$(RUBY) $(top_srcdir)/tool/lib/colorize.rb skip]
@@ -793,9 +818,9 @@ begin
     if $gnumake == "yes"
       submake = "$(MAKE) -C $(@D)"
     else
-      submake = "cd $(@D) && "
-      config_string("exec") {|str| submake << str << " "}
-      submake << "$(MAKE)"
+      submake = ["cd", (sep ? "$(@D:/=#{sep})" : "$(@D)"), "&&"]
+      config_string("exec") {|str| submake << str}
+      submake = (submake << "$(MAKE)").join(" ")
     end
     targets.each do |tgt|
       exts.each do |d|
@@ -810,7 +835,7 @@ begin
         end
         mf.puts "#{t}:#{pd}\n\t$(Q)#{submake} $(MFLAGS) V=$(V) $(@F)"
         if clean and clean.begin(1)
-          mf.puts "\t$(Q)$(RM) $(ext_build_dir)/exts.mk\n\t$(Q)$(RMDIRS) -p $(@D)"
+          mf.puts "\t$(Q)$(RM) $(ext_build_dir)/exts.mk\n\t$(Q)$(RMDIRS) $(@D)"
         end
       end
     end

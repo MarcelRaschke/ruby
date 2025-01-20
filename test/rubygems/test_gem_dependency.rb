@@ -22,7 +22,7 @@ class TestGemDependency < Gem::TestCase
       Gem::Dependency.new "monkey" => "1.0"
     end
 
-    assert_equal 'dependency name must be a String, was {"monkey"=>"1.0"}',
+    assert_equal "dependency name must be a String, was #{{ "monkey" => "1.0" }.inspect}",
                  e.message
   end
 
@@ -392,6 +392,16 @@ class TestGemDependency < Gem::TestCase
     end
 
     assert_match "Could not find 'b' (= 2.0) among 1 total gem(s)", e.message
+  end
+
+  def test_to_spec_with_only_prereleases
+    a_2_a_1 = util_spec "a", "2.a1"
+    a_2_a_2 = util_spec "a", "2.a2"
+    install_specs a_2_a_1, a_2_a_2
+
+    a_dep = dep "a", ">= 1"
+
+    assert_equal a_2_a_2, a_dep.to_spec
   end
 
   def test_identity

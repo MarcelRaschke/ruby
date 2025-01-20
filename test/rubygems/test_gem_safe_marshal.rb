@@ -99,8 +99,12 @@ class TestGemSafeMarshal < Gem::TestCase
   define_method("test_safe_load_marshal Array [\"abc\", \"abc\"] Windows-1256") { assert_safe_load_marshal "\x04\b[\aI\"\babc\x06:\rencoding\"\x11Windows-1256@\x06", additional_methods: [->(x) { x.map(&:encoding) }] }
   define_method("test_safe_load_marshal String \"abc\" binary") { assert_safe_load_marshal "\x04\b\"\babc", additional_methods: [:encoding] }
   define_method("test_safe_load_marshal Array [\"abc\", \"abc\"] binary") { assert_safe_load_marshal "\x04\b[\a\"\babc@\x06", additional_methods: [->(x) { x.map(&:encoding) }] }
-  define_method("test_safe_load_marshal String \"\\x61\\x62\\x63\" utf32") { assert_safe_load_marshal "\x04\bI\"\babc\x06:\rencoding\"\vUTF-32", additional_methods: [:encoding] }
-  define_method("test_safe_load_marshal Array [\"\\x61\\x62\\x63\", \"\\x61\\x62\\x63\"] utf32") { assert_safe_load_marshal "\x04\b[\aI\"\babc\x06:\rencoding\"\vUTF-32@\x06", additional_methods: [->(x) { x.map(&:encoding) }] }
+  unless RUBY_ENGINE == "truffleruby" # Not supported
+    define_method("test_safe_load_marshal String \"\\x61\\x62\\x63\" utf32 with length not a multiple of 4") { assert_safe_load_marshal "\x04\bI\"\babc\x06:\rencoding\"\vUTF-32", additional_methods: [:encoding] }
+    define_method("test_safe_load_marshal Array [\"\\x61\\x62\\x63\", \"\\x61\\x62\\x63\"] utf32 with length not a multiple of 4)") { assert_safe_load_marshal "\x04\b[\aI\"\babc\x06:\rencoding\"\vUTF-32@\x06", additional_methods: [->(x) { x.map(&:encoding) }] }
+  end
+  define_method("test_safe_load_marshal String \"\\x61\\x62\\x63\\x64\" utf32") { assert_safe_load_marshal "\x04\bI\"\x09abcd\x06:\rencoding\"\vUTF-32", additional_methods: [:encoding] }
+  define_method("test_safe_load_marshal Array [\"\\x61\\x62\\x63\\x64\", \"\\x61\\x62\\x63\\x64\"] utf32") { assert_safe_load_marshal "\x04\b[\aI\"\x09abcd\x06:\rencoding\"\vUTF-32@\x06", additional_methods: [->(x) { x.map(&:encoding) }] }
   define_method("test_safe_load_marshal String \"abc\" ivar") { assert_safe_load_marshal "\x04\bI\"\babc\a:\x06ET:\n@typeI\"\ttype\x06;\x00T", permitted_ivars: { "String" => %w[@type E] } }
   define_method("test_safe_load_marshal String \"\"") { assert_safe_load_marshal "\x04\bI\"\babc\x06:\x06ET" }
   define_method("test_safe_load_marshal Time 2000-12-31 20:07:59 -1152") { assert_safe_load_marshal "\x04\bIu:\tTime\r'@\x19\x80\x00\x00\xB0\xEF\a:\voffseti\xFE Y:\tzone0", additional_methods: [:ctime, :to_f, :to_r, :to_i, :zone, :subsec, :instance_variables, :dst?, :to_a] }
@@ -120,7 +124,7 @@ class TestGemSafeMarshal < Gem::TestCase
   define_method("test_safe_load_marshal Time 2001-01-01 07:59:59 UTC") { assert_safe_load_marshal "\x04\bIu:\tTime\r'@\x19\xC0\x00\x00\xB0\xEF\x06:\tzoneI\"\bUTC\x06:\x06EF", additional_methods: [:ctime, :to_f, :to_r, :to_i, :zone, :subsec, :instance_variables, :dst?, :to_a] }
   define_method("test_safe_load_marshal Time 2001-01-01 11:59:59 +0400") { assert_safe_load_marshal "\x04\bIu:\tTime\r'@\x19\x80\x00\x00\xB0\xEF\a:\voffseti\x02@8:\tzone0", additional_methods: [:ctime, :to_f, :to_r, :to_i, :zone, :subsec, :instance_variables, :dst?, :to_a] }
   define_method("test_safe_load_marshal Time 2023-08-24 10:10:39.09565 -0700") { assert_safe_load_marshal "\x04\bIu:\tTime\r\x11\xDF\x1E\x80\xA2uq*\a:\voffseti\xFE\x90\x9D:\tzoneI\"\bPDT\x06:\x06EF" }
-  define_method("test_safe_load_marshal Time 2023-08-24 10:10:39.098453 -0700") { assert_safe_load_marshal "\x04\bIu:\tTime\r\x11\xDF\x1E\x80\x95\x80q*\b:\n@typeI\"\fruntime\x06:\x06ET:\voffseti\xFE\x90\x9D:\tzoneI\"\bPDT\x06;\aF", permitted_ivars: { "Time" => %w[@type offset zone], "String" => %w[E @debug_created_info] }, marshal_dump_equality: RUBY_ENGINE != "truffleruby" || RUBY_ENGINE_VERSION >= "23" }
+  define_method("test_safe_load_marshal Time 2023-08-24 10:10:39.098453 -0700") { assert_safe_load_marshal "\x04\bIu:\tTime\r\x11\xDF\x1E\x80\x95\x80q*\b:\n@typeI\"\fruntime\x06:\x06ET:\voffseti\xFE\x90\x9D:\tzoneI\"\bPDT\x06;\aF", permitted_ivars: { "Time" => %w[@type offset zone], "String" => %w[E @debug_created_info] }, marshal_dump_equality: true }
 
   def test_repeated_symbol
     assert_safe_load_as [:development, :development]
@@ -163,14 +167,16 @@ class TestGemSafeMarshal < Gem::TestCase
       String.new("abc", encoding: "UTF-8"),
       String.new("abc", encoding: "Windows-1256"),
       String.new("abc", encoding: Encoding::BINARY),
-      String.new("abc", encoding: "UTF-32"),
+      String.new("abcd", encoding: "UTF-32"),
+      # TruffleRuby: Not supported since length of UTF-16 string must be a multiple of 2
+      (String.new("abc", encoding: "UTF-32") unless RUBY_ENGINE == "truffleruby"),
 
       String.new("", encoding: "US-ASCII"),
       String.new("", encoding: "UTF-8"),
       String.new("", encoding: "Windows-1256"),
       String.new("", encoding: Encoding::BINARY),
       String.new("", encoding: "UTF-32"),
-    ].each do |s|
+    ].compact.each do |s|
       assert_safe_load_as s, additional_methods: [:encoding]
       assert_safe_load_as [s, s], additional_methods: [->(a) { a.map(&:encoding) }]
     end
@@ -188,7 +194,7 @@ class TestGemSafeMarshal < Gem::TestCase
     pend "Marshal.load of Time with ivars is broken on jruby, see https://github.com/jruby/jruby/issues/7902" if RUBY_ENGINE == "jruby"
 
     with_const(Gem::SafeMarshal, :PERMITTED_IVARS, { "Time" => %w[@type offset zone nano_num nano_den submicro], "String" => %w[E @debug_created_info] }) do
-      assert_safe_load_as Time.new.tap {|t| t.instance_variable_set :@type, "runtime" }, marshal_dump_equality: RUBY_ENGINE != "truffleruby" || RUBY_ENGINE_VERSION >= "23"
+      assert_safe_load_as Time.new.tap {|t| t.instance_variable_set :@type, "runtime" }, marshal_dump_equality: true
     end
   end
 
@@ -211,17 +217,10 @@ class TestGemSafeMarshal < Gem::TestCase
     Time.at(secs, 1.001, :nanosecond),
     Time.at(secs, 1.00001, :nanosecond),
     Time.at(secs, 1.00001, :nanosecond),
-  ].tap do |times|
-    unless RUBY_ENGINE == "truffleruby" && RUBY_ENGINE_VERSION < "23"
-      times.concat [
-        Time.at(secs, in: "UTC"),
-        Time.at(secs, in: "Z"),
-      ]
-    end
-  end.each_with_index do |t, i|
+    Time.at(secs, in: "UTC"),
+    Time.at(secs, in: "Z"),
+  ].each_with_index do |t, i|
     define_method("test_time_#{i} #{t.inspect}") do
-      pend "Marshal.load of Time with custom zone is broken before Truffleruby 23" if t.zone.nil? && RUBY_ENGINE == "truffleruby" && RUBY_ENGINE_VERSION < "23"
-
       additional_methods = [:ctime, :to_f, :to_r, :to_i, :zone, :subsec, :instance_variables, :dst?, :to_a]
       assert_safe_load_as t, additional_methods: additional_methods
     end
@@ -232,6 +231,14 @@ class TestGemSafeMarshal < Gem::TestCase
       assert_safe_load_as f
       assert_safe_load_as(-f)
     end
+  end
+
+  def test_link_after_float
+    pend "Marshal.load of links and floats is broken on truffleruby, see https://github.com/oracle/truffleruby/issues/3747" if RUBY_ENGINE == "truffleruby"
+
+    a = []
+    a << a
+    assert_safe_load_as [0.0, a, 1.0, a]
   end
 
   def test_hash_with_ivar
@@ -256,6 +263,31 @@ class TestGemSafeMarshal < Gem::TestCase
                             h[+"a"] = 1
                             h[+"a"] = 2 }, additional_methods: [:compare_by_identity?, :default], equality: false
     end
+  end
+
+  class UserMarshal
+    def marshal_load(*)
+      throw "#{self.class}#marshal_load called"
+    end
+
+    def marshal_dump
+    end
+  end
+
+  def test_time_user_marshal
+    payload = [
+      Marshal::MAJOR_VERSION.chr, Marshal::MINOR_VERSION.chr,
+      "I", # TYPE_IVAR
+      "u", # TYPE_USERDEF
+      Marshal.dump(:Time)[2..-1],
+      Marshal.dump(0xfb - 5)[3..-1],
+      Marshal.dump(1)[3..-1],
+      Marshal.dump(:zone)[2..-1],
+      Marshal.dump(UserMarshal.new)[2..-1],
+      ("\x00" * (236 - UserMarshal.name.bytesize))
+    ].join
+
+    assert_raise(Gem::SafeMarshal::Visitors::ToRuby::TimeTooLargeError, TypeError) { Gem::SafeMarshal.safe_load(payload) }
   end
 
   class StringSubclass < ::String
@@ -293,8 +325,6 @@ class TestGemSafeMarshal < Gem::TestCase
   end
 
   def test_rational
-    pend "truffleruby dumps rationals with ivars set on array, see https://github.com/oracle/truffleruby/issues/3228" if RUBY_ENGINE == "truffleruby"
-
     assert_safe_load_as Rational(1, 3)
   end
 
@@ -312,6 +342,46 @@ class TestGemSafeMarshal < Gem::TestCase
       assert_safe_load_as(i + 1)
       assert_safe_load_as(i - 1)
     end
+  end
+
+  def test_gem_spec_unmarshall_license
+    spec = Gem::Specification.new do |s|
+      s.name = "hi"
+      s.version = "1.2.3"
+      s.license = "MIT"
+    end
+
+    unmarshalled_spec = Gem::SafeMarshal.safe_load(Marshal.dump(spec))
+
+    assert_equal ["MIT"], unmarshalled_spec.licenses
+    assert_equal "MIT", unmarshalled_spec.license
+
+    spec = Gem::Specification.new do |s|
+      s.name = "hi"
+      s.version = "1.2.3"
+      s.licenses = ["MIT", "GPL2"]
+    end
+
+    unmarshalled_spec = Gem::SafeMarshal.safe_load(Marshal.dump(spec))
+
+    assert_equal ["MIT", "GPL2"], unmarshalled_spec.licenses
+    assert_equal "MIT", unmarshalled_spec.license
+  end
+
+  def test_gem_spec_unmarshall_required_ruby_rubygems_version
+    spec = Gem::Specification.new do |s|
+      s.name = "hi"
+      s.version = "1.2.3"
+      s.license = "MIT"
+    end
+
+    assert_safe_load_marshal spec._dump(0), inspect: false, to_s: false
+    assert_safe_load_marshal Marshal.dump(spec), inspect: false, additional_methods: [:to_ruby, :required_ruby_version, :required_rubygems_version]
+
+    unmarshalled_spec = Gem::SafeMarshal.safe_load(Marshal.dump(spec))
+
+    assert_equal Gem::Requirement.new(">= 0"), unmarshalled_spec.required_ruby_version
+    assert_equal Gem::Requirement.new(">= 0"), unmarshalled_spec.required_rubygems_version
   end
 
   def test_gem_spec_disallowed_symbol
@@ -357,17 +427,52 @@ class TestGemSafeMarshal < Gem::TestCase
       Gem::SafeMarshal.safe_load("\x04\x08[\x06")
     end
     assert_equal e.message, "Unexpected EOF"
+
+    e = assert_raise(Gem::SafeMarshal::Reader::EOFError) do
+      Gem::SafeMarshal.safe_load("\004\010:\012")
+    end
+    assert_equal e.message, "expected 5 bytes, got EOF"
+
+    e = assert_raise(Gem::SafeMarshal::Reader::EOFError) do
+      Gem::SafeMarshal.safe_load("\x04\x08i\x01")
+    end
+    assert_equal e.message, "Unexpected EOF"
+    e = assert_raise(Gem::SafeMarshal::Reader::EOFError) do
+      Gem::SafeMarshal.safe_load("\x04\x08\"\x06")
+    end
+    assert_equal e.message, "expected 1 bytes, got EOF"
   end
 
-  def assert_safe_load_marshal(dumped, additional_methods: [], permitted_ivars: nil, equality: true, marshal_dump_equality: true)
+  def test_negative_length
+    assert_raise(Gem::SafeMarshal::Reader::NegativeLengthError) do
+      Gem::SafeMarshal.safe_load("\004\010}\325")
+    end
+    assert_raise(Gem::SafeMarshal::Reader::NegativeLengthError) do
+      Gem::SafeMarshal.safe_load("\004\010:\325")
+    end
+    assert_raise(Gem::SafeMarshal::Reader::NegativeLengthError) do
+      Gem::SafeMarshal.safe_load("\004\010\"\325")
+    end
+    assert_raise(IndexError) do
+      Gem::SafeMarshal.safe_load("\004\010;\325")
+    end
+    assert_raise(Gem::SafeMarshal::Reader::EOFError) do
+      Gem::SafeMarshal.safe_load("\004\010@\377")
+    end
+  end
+
+  def assert_safe_load_marshal(dumped, additional_methods: [], permitted_ivars: nil, equality: true, marshal_dump_equality: true,
+    inspect: true, to_s: true)
     loaded = Marshal.load(dumped)
     safe_loaded =
-      if permitted_ivars
-        with_const(Gem::SafeMarshal, :PERMITTED_IVARS, permitted_ivars) do
+      assert_nothing_raised("dumped: #{dumped.b.inspect} loaded: #{loaded.inspect}") do
+        if permitted_ivars
+          with_const(Gem::SafeMarshal, :PERMITTED_IVARS, permitted_ivars) do
+            Gem::SafeMarshal.safe_load(dumped)
+          end
+        else
           Gem::SafeMarshal.safe_load(dumped)
         end
-      else
-        Gem::SafeMarshal.safe_load(dumped)
       end
 
     # NaN != NaN, for example
@@ -375,8 +480,8 @@ class TestGemSafeMarshal < Gem::TestCase
       assert_equal loaded, safe_loaded, "should equal what Marshal.load returns"
     end
 
-    assert_equal loaded.to_s, safe_loaded.to_s, "should have equal to_s"
-    assert_equal loaded.inspect, safe_loaded.inspect, "should have equal inspect"
+    assert_equal loaded.to_s, safe_loaded.to_s, "should have equal to_s" if to_s
+    assert_equal loaded.inspect, safe_loaded.inspect, "should have equal inspect" if inspect
     additional_methods.each do |m|
       if m.is_a?(Proc)
         call = m

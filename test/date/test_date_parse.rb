@@ -589,10 +589,13 @@ class TestDateParse < Test::Unit::TestCase
   end
 
   def test__parse_too_long_year
-    str = "Jan 1" + "0" * 100_000
-    h = EnvUtil.timeout(3) {Date._parse(str, limit: 100_010)}
-    assert_equal(100_000, Math.log10(h[:year]))
-    assert_equal(1, h[:mon])
+    # Math.log10 does not support so big numbers like 10^100_000 on TruffleRuby
+    unless RUBY_ENGINE == 'truffleruby'
+      str = "Jan 1" + "0" * 100_000
+      h = EnvUtil.timeout(3) {Date._parse(str, limit: 100_010)}
+      assert_equal(100_000, Math.log10(h[:year]))
+      assert_equal(1, h[:mon])
+    end
 
     str = "Jan - 1" + "0" * 100_000
     h = EnvUtil.timeout(3) {Date._parse(str, limit: 100_010)}
@@ -867,9 +870,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._iso8601(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._iso8601('01-02-03T04:05:06Z'.to_sym)}
-    assert_equal([2001, 2, 3, 4, 5, 6, 0],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._iso8601('01-02-03T04:05:06Z'.to_sym)}
   end
 
   def test__rfc3339
@@ -889,9 +890,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._rfc3339(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._rfc3339('2001-02-03T04:05:06Z'.to_sym)}
-    assert_equal([2001, 2, 3, 4, 5, 6, 0],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._rfc3339('2001-02-03T04:05:06Z'.to_sym)}
   end
 
   def test__xmlschema
@@ -978,9 +977,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._xmlschema(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._xmlschema('2001-02-03'.to_sym)}
-    assert_equal([2001, 2, 3, nil, nil, nil, nil],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._xmlschema('2001-02-03'.to_sym)}
   end
 
   def test__rfc2822
@@ -1017,9 +1014,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._rfc2822(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._rfc2822('Sat, 3 Feb 2001 04:05:06 UT'.to_sym)}
-    assert_equal([2001, 2, 3, 4, 5, 6, 0],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._rfc2822('Sat, 3 Feb 2001 04:05:06 UT'.to_sym)}
   end
 
   def test__httpdate
@@ -1044,9 +1039,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._httpdate(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._httpdate('Sat, 03 Feb 2001 04:05:06 GMT'.to_sym)}
-    assert_equal([2001, 2, 3, 4, 5, 6, 0],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._httpdate('Sat, 03 Feb 2001 04:05:06 GMT'.to_sym)}
   end
 
   def test__jisx0301
@@ -1127,9 +1120,7 @@ class TestDateParse < Test::Unit::TestCase
     h = Date._jisx0301(nil)
     assert_equal({}, h)
 
-    h = assert_deprecated_warn {Date._jisx0301('H13.02.03T04:05:06.07+0100'.to_sym)}
-    assert_equal([2001, 2, 3, 4, 5, 6, 3600],
-      h.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset))
+    assert_raise(TypeError) {Date._jisx0301('H13.02.03T04:05:06.07+0100'.to_sym)}
   end
 
   def test_iso8601

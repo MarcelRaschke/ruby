@@ -56,7 +56,7 @@ PACKAGES = {
 DEFAULT_PACKAGES = PACKAGES.keys - ["tar"]
 if !$no7z and system("7z", out: IO::NULL)
   PACKAGES["gzip"] = %w".tar.gz 7z a dummy -tgzip -mx -so"
-  PACKAGES["zip"]  = %w".zip    7z a -tzip -l -mx -mtc=off" << {out: IO::NULL}
+  PACKAGES["zip"]  = %w".zip    7z a -tzip -mx -mtc=off" << {out: IO::NULL}
 elsif gzip = ENV.delete("GZIP")
   PACKAGES["gzip"].concat(gzip.shellsplit)
 end
@@ -72,7 +72,7 @@ GITURL = URI.parse("https://github.com/ruby/ruby.git")
 RUBY_VERSION_PATTERN = /^\#define\s+RUBY_VERSION\s+"([\d.]+)"/
 
 ENV["VPATH"] ||= "include/ruby"
-YACC = ENV["YACC"] ||= "#{$tooldir}/lrama/exe/lrama"
+LRAMA = ENV["LRAMA"] ||= "#{$tooldir}/lrama/exe/lrama"
 ENV["BASERUBY"] ||= "ruby"
 ENV["RUBY"] ||= "ruby"
 ENV["MV"] ||= "mv"
@@ -118,7 +118,7 @@ $digests ||= DIGESTS
 
 $patch_file &&= File.expand_path($patch_file)
 path = ENV["PATH"].split(File::PATH_SEPARATOR)
-%w[YACC BASERUBY RUBY MV MINIRUBY].each do |var|
+%w[LRAMA BASERUBY RUBY MV MINIRUBY].each do |var|
   cmd, = ENV[var].shellsplit
   unless path.any? {|dir|
       file = File.expand_path(cmd, dir)
@@ -514,7 +514,7 @@ touch-unicode-files:
       end
       print "prerequisites"
     else
-      system(*%W"#{YACC} -o parse.c parse.y")
+      system(*%W"#{LRAMA} -o parse.c parse.y")
     end
     vcs.after_export(".") if exported
     clean.concat(Dir.glob("ext/**/autom4te.cache"))

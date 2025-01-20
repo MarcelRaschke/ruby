@@ -207,7 +207,7 @@ class TestBignum < Test::Unit::TestCase
     assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
     begin;
       digits = [["3", 700], ["0", 2700], ["1", 1], ["0", 26599]]
-      num = digits.inject("") {|s,(c,n)|s << c*n}.to_i
+      num = digits.inject(+"") {|s,(c,n)|s << c*n}.to_i
       assert_equal digits.sum {|c,n|n}, num.to_s.size
     end;
   end
@@ -476,8 +476,8 @@ class TestBignum < Test::Unit::TestCase
   def test_pow
     assert_equal(1.0, T32 ** 0.0)
     assert_equal(1.0 / T32, T32 ** -1)
-    assert_equal(1, assert_warning(/may be too big/) {T32 ** T32}.infinite?)
-    assert_equal(1, assert_warning(/may be too big/) {T32 ** (2**30-1)}.infinite?)
+    assert_raise(ArgumentError) { T32 ** T32 }
+    assert_raise(ArgumentError) { T32 ** (2**30-1) }
 
     ### rational changes the behavior of Bignum#**
     #assert_raise(TypeError) { T32**"foo" }
@@ -821,5 +821,11 @@ class TestBignum < Test::Unit::TestCase
     assert_nil(T1024P.infinite?)
     assert_nil((-T1024P).infinite?)
   end
+
+  def test_gmp_version
+    if RbConfig::CONFIG.fetch('configure_args').include?("'--with-gmp'")
+      assert_kind_of(String, Integer::GMP_VERSION)
+    end
+  end if ENV['GITHUB_WORKFLOW'] == 'Compilations'
 end
 end

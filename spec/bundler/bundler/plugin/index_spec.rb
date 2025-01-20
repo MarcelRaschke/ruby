@@ -5,7 +5,7 @@ RSpec.describe Bundler::Plugin::Index do
 
   before do
     allow(Bundler::SharedHelpers).to receive(:find_gemfile).and_return(bundled_app_gemfile)
-    gemfile "source \"#{file_uri_for(gem_repo1)}\""
+    gemfile "source 'https://gem.repo1'"
     path = lib_path(plugin_name)
     index.register_plugin("new-plugin", path.to_s, [path.join("lib").to_s], commands, sources, hooks)
   end
@@ -191,14 +191,6 @@ RSpec.describe Bundler::Plugin::Index do
       end
 
       include_examples "it cleans up"
-    end
-  end
-
-  describe "readonly disk without home" do
-    it "ignores being unable to create temp home dir" do
-      expect_any_instance_of(Bundler::Plugin::Index).to receive(:global_index_file).
-        and_raise(Bundler::GenericSystemCallError.new("foo", "bar"))
-      Bundler::Plugin::Index.new
     end
   end
 end

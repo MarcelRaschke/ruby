@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "benchmark"
 require_relative "helper"
 require "date"
 require "pathname"
@@ -56,7 +55,6 @@ end
       s.add_dependency "jabber4r", "> 0.0.0"
       s.add_dependency "pqa", ["> 0.4", "<= 0.6"]
 
-      s.mark_version
       s.files = %w[lib/code.rb]
     end
   end
@@ -69,7 +67,6 @@ end
       s.license = "MIT"
       s.platform = platform
 
-      s.mark_version
       s.files = %w[lib/code.rb]
       s.installed_by_version = v("2.2")
     end
@@ -90,12 +87,12 @@ end
     Gem.instance_variable_set(:'@default_source_date_epoch', nil)
 
     @a1 = util_spec "a", "1" do |s|
+      s.required_ruby_version = ">= 2.3.0"
       s.executable = "exec"
       s.test_file = "test/suite.rb"
       s.requirements << "A working computer"
       s.license = "MIT"
 
-      s.mark_version
       s.files = %w[lib/code.rb]
     end
 
@@ -148,6 +145,12 @@ end
   end
 
   def test_find_in_unresolved_tree_is_not_exponentiental
+    begin
+      require "benchmark"
+    rescue LoadError
+      pend "Benchmark is not available in this environment. Please install it with `gem install benchmark`."
+    end
+
     pend "currently slower in CI on TruffleRuby" if RUBY_ENGINE == "truffleruby"
     num_of_pkg = 7
     num_of_version_per_pkg = 3
@@ -969,7 +972,10 @@ dependencies: []
 
   def test_self_stubs_for_lazy_loading
     Gem.loaded_specs.clear
-    Gem::Specification.class_variable_set(:@@stubs, nil)
+
+    specification_record = Gem::Specification.specification_record
+
+    specification_record.instance_variable_set(:@stubs, nil)
 
     dir_standard_specs = File.join Gem.dir, "specifications"
 
@@ -977,9 +983,9 @@ dependencies: []
     save_gemspec("b-1", "1", dir_standard_specs) {|s| s.name = "b" }
 
     assert_equal ["a-1"], Gem::Specification.stubs_for("a").map(&:full_name)
-    assert_equal 1, Gem::Specification.class_variable_get(:@@stubs_by_name).length
+    assert_equal 1, specification_record.instance_variable_get(:@stubs_by_name).length
     assert_equal ["b-1"], Gem::Specification.stubs_for("b").map(&:full_name)
-    assert_equal 2, Gem::Specification.class_variable_get(:@@stubs_by_name).length
+    assert_equal 2, specification_record.instance_variable_get(:@stubs_by_name).length
 
     assert_equal(
       Gem::Specification.stubs_for("a").map(&:object_id),
@@ -988,7 +994,7 @@ dependencies: []
 
     Gem.loaded_specs.delete "a"
     Gem.loaded_specs.delete "b"
-    Gem::Specification.class_variable_set(:@@stubs, nil)
+    specification_record.instance_variable_set(:@stubs, nil)
   end
 
   def test_self_stubs_for_no_lazy_loading_after_all_specs_setup
@@ -1194,10 +1200,13 @@ dependencies: []
     assert_same spec.bindir, dup_spec.bindir
 
     assert_equal ">= 0", spec.required_ruby_version.to_s
-    assert_same spec.required_ruby_version, dup_spec.required_ruby_version
+    assert_equal spec.required_ruby_version, dup_spec.required_ruby_version
+    refute_same spec.required_ruby_version, dup_spec.required_ruby_version
 
     assert_equal ">= 0", spec.required_rubygems_version.to_s
-    assert_same spec.required_rubygems_version,
+    assert_equal spec.required_rubygems_version,
+                 dup_spec.required_rubygems_version
+    refute_same spec.required_rubygems_version,
                 dup_spec.required_rubygems_version
   end
 
@@ -1325,7 +1334,6 @@ dependencies: []
   end
 
   def test_build_args
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     assert_empty @ext.build_args
@@ -1342,7 +1350,6 @@ dependencies: []
   end
 
   def test_build_extensions
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     assert_path_not_exist @ext.extension_dir, "sanity check"
@@ -1378,7 +1385,6 @@ dependencies: []
   end
 
   def test_build_extensions_built
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     refute_empty @ext.extensions, "sanity check"
@@ -1417,7 +1423,6 @@ dependencies: []
   end
 
   def test_build_extensions_error
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     refute_empty @ext.extensions, "sanity check"
@@ -1431,7 +1436,7 @@ dependencies: []
     pend "chmod not supported" if Gem.win_platform?
     pend "skipped in root privilege" if Process.uid.zero?
 
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
+    pend "needs investigation" if Gem.java_platform?
     ext_spec
 
     refute_empty @ext.extensions, "sanity check"
@@ -1464,7 +1469,6 @@ dependencies: []
 
   def test_build_extensions_no_extensions_dir_unwritable
     pend "chmod not supported" if Gem.win_platform?
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     refute_empty @ext.extensions, "sanity check"
@@ -1503,7 +1507,6 @@ dependencies: []
   end
 
   def test_build_extensions_preview
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     extconf_rb = File.join @ext.gem_dir, @ext.extensions.first
@@ -1538,7 +1541,6 @@ dependencies: []
   end
 
   def test_contains_requirable_file_eh_extension
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     _, err = capture_output do
@@ -1829,7 +1831,7 @@ dependencies: []
   end
 
   def test_for_cache
-    @a2.add_runtime_dependency "b", "1"
+    @a2.add_dependency "b", "1"
     @a2.dependencies.first.instance_variable_set :@type, nil
     @a2.required_rubygems_version = Gem::Requirement.new "> 0"
     @a2.test_files = %w[test/test_b.rb]
@@ -2261,7 +2263,7 @@ dependencies: []
   end
 
   def test_to_ruby
-    @a2.add_runtime_dependency "b", "1"
+    @a2.add_dependency "b", "1"
     @a2.dependencies.first.instance_variable_set :@type, nil
     @a2.required_rubygems_version = Gem::Requirement.new "> 0"
     @a2.require_paths << "other"
@@ -2333,7 +2335,7 @@ end
   end
 
   def test_to_ruby_for_cache
-    @a2.add_runtime_dependency "b", "1"
+    @a2.add_dependency "b", "1"
     @a2.dependencies.first.instance_variable_set :@type, nil
     @a2.required_rubygems_version = Gem::Requirement.new "> 0"
     @a2.installed_by_version = Gem.rubygems_version
@@ -2359,7 +2361,7 @@ Gem::Specification.new do |s|
   s.rubygems_version = "#{Gem::VERSION}".freeze
   s.summary = "this is a summary".freeze
 
-  s.installed_by_version = "#{Gem::VERSION}".freeze if s.respond_to? :installed_by_version
+  s.installed_by_version = "#{Gem::VERSION}".freeze
 
   s.specification_version = #{Gem::Specification::CURRENT_SPECIFICATION_VERSION}
 
@@ -2490,7 +2492,31 @@ end
     assert_equal @a1, same_spec
   end
 
-  def test_to_yaml_platform_empty_string
+  def test_to_yaml_platform
+    yaml_str = @a1.to_yaml
+
+    assert_match(/^platform: ruby$/, yaml_str)
+    refute_match(/^original_platform: /, yaml_str)
+  end
+
+  def test_to_yaml_platform_no_specific_platform
+    a = Gem::Specification.new do |s|
+      s.name        = "a"
+      s.version     = "1.0"
+      s.author      = "A User"
+      s.email       = "example@example.com"
+      s.homepage    = "http://example.com"
+      s.summary     = "this is a summary"
+      s.description = "This is a test description"
+    end
+
+    yaml_str = a.to_yaml
+
+    assert_match(/^platform: ruby$/, yaml_str)
+    refute_match(/^original_platform: /, yaml_str)
+  end
+
+  def test_to_yaml_platform_original_platform_empty_string
     @a1.instance_variable_set :@original_platform, ""
 
     assert_match(/^platform: ruby$/, @a1.to_yaml)
@@ -2508,10 +2534,30 @@ end
     assert_equal "powerpc-darwin7.9.0", same_spec.original_platform
   end
 
-  def test_to_yaml_platform_nil
+  def test_to_yaml_platform_original_platform_nil
     @a1.instance_variable_set :@original_platform, nil
 
     assert_match(/^platform: ruby$/, @a1.to_yaml)
+  end
+
+  def test_to_yaml_no_autorequire
+    yaml_str = @a1.to_yaml
+
+    refute_match(/^autorequire:/, yaml_str)
+  end
+
+  def test_to_yaml_no_signing_key
+    @a1.signing_key = nil
+    yaml_str = @a1.to_yaml
+
+    refute_match(/^signing_key:/, yaml_str)
+  end
+
+  def test_to_yaml_no_post_install_message
+    @a1.post_install_message = nil
+    yaml_str = @a1.to_yaml
+
+    refute_match(/^post_install_message:/, yaml_str)
   end
 
   def test_validate
@@ -2684,12 +2730,59 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
     end
   end
 
+  def test_validate_no_required_ruby_versions
+    util_setup_validate
+
+    Dir.chdir @tempdir do
+      use_ui @ui do
+        @a1.required_ruby_version = nil # reset
+        @a1.validate
+      end
+
+      assert_equal <<-EXPECTED, @ui.error
+#{w}:  make sure you specify the oldest ruby version constraint (like \">= 3.0\") that you want your gem to support by setting the `required_ruby_version` gemspec attribute
+#{w}:  See https://guides.rubygems.org/specification-reference/ for help
+      EXPECTED
+    end
+  end
+
+  def test_validate_open_required_ruby_versions
+    util_setup_validate
+
+    Dir.chdir @tempdir do
+      @a1.required_ruby_version = ">= 0"
+
+      use_ui @ui do
+        @a1.validate
+      end
+
+      assert_equal <<-EXPECTED, @ui.error
+#{w}:  make sure you specify the oldest ruby version constraint (like \">= 3.0\") that you want your gem to support by setting the `required_ruby_version` gemspec attribute
+#{w}:  See https://guides.rubygems.org/specification-reference/ for help
+      EXPECTED
+    end
+  end
+
+  def test_validate_valid_required_ruby_versions
+    util_setup_validate
+
+    Dir.chdir @tempdir do
+      @a1.required_ruby_version = ">= 2.3.0"
+
+      use_ui @ui do
+        @a1.validate
+      end
+
+      assert_equal "", @ui.error, "warning"
+    end
+  end
+
   def test_validate_prerelease_dependencies_with_prerelease_version
     util_setup_validate
 
     Dir.chdir @tempdir do
       @a1.version = "1.0.0.beta.1"
-      @a1.add_runtime_dependency "b", "~> 1.2.0.beta.1"
+      @a1.add_dependency "b", "~> 1.2.0.beta.1"
 
       use_ui @ui do
         @a1.validate
@@ -2703,7 +2796,7 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
     util_setup_validate
 
     Dir.chdir @tempdir do
-      @a1.add_runtime_dependency @a1.name, "1"
+      @a1.add_dependency @a1.name, "1"
 
       use_ui @ui do
         @a1.validate
@@ -2727,7 +2820,7 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
         @a1.validate
       end
 
-      assert_match(/add rake as a dependency/, @ui.error)
+      assert_match(/add rake as a runtime dependency/, @ui.error)
     end
   end
 
@@ -2736,14 +2829,14 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
 
     Dir.chdir @tempdir do
       @a1.extensions = ["Rakefile"]
-      @a1.add_runtime_dependency "rake"
+      @a1.add_dependency "rake"
       File.write File.join(@tempdir, "Rakefile"), ""
 
       use_ui @ui do
         @a1.validate
       end
 
-      refute_match(/add rake as a dependency/, @ui.error)
+      refute_match(/add rake as a runtime dependency/, @ui.error)
     end
   end
 
@@ -2907,19 +3000,27 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
   end
 
   def test_validate_empty_require_paths
-    if Gem.win_platform?
-      pend "test_validate_empty_require_paths skipped on MS Windows (symlink)"
-    else
-      util_setup_validate
+    util_setup_validate
 
-      @a1.require_paths = []
-      e = assert_raise Gem::InvalidSpecificationException do
-        @a1.validate
-      end
-
-      assert_equal "specification must have at least one require_path",
-                   e.message
+    @a1.require_paths = []
+    e = assert_raise Gem::InvalidSpecificationException do
+      @a1.validate
     end
+
+    assert_equal "specification must have at least one require_path",
+                 e.message
+  end
+
+  def test_validate_require_paths_with_invalid_types
+    util_setup_validate
+
+    @a1.require_paths = [1, 2]
+    e = assert_raise Gem::InvalidSpecificationException do
+      @a1.validate
+    end
+
+    assert_equal "require_paths must be an Array of String",
+                 e.message
   end
 
   def test_validate_files
@@ -2948,9 +3049,7 @@ duplicate dependency on c (>= 1.2.3, development), (~> 1.2) use:
 
     set_orig specification
 
-    specification.define_singleton_method(:unresolved_deps) do
-      { b: Gem::Dependency.new("x","1") }
-    end
+    specification.instance_variable_set(:@unresolved_deps, { b: Gem::Dependency.new("x","1") })
 
     specification.define_singleton_method(:find_all_by_name) do |_dep_name|
       []
@@ -2968,6 +3067,7 @@ Please report a bug if this causes problems.
     end
     assert_empty actual_stdout
     assert_equal(expected, actual_stderr)
+    assert_empty specification.unresolved_deps
   end
 
   def test_unresolved_specs_with_versions
@@ -2975,9 +3075,7 @@ Please report a bug if this causes problems.
 
     set_orig specification
 
-    specification.define_singleton_method(:unresolved_deps) do
-      { b: Gem::Dependency.new("x","1") }
-    end
+    specification.instance_variable_set(:@unresolved_deps, { b: Gem::Dependency.new("x","1") })
 
     specification.define_singleton_method(:find_all_by_name) do |_dep_name|
       [
@@ -3001,20 +3099,75 @@ Please report a bug if this causes problems.
     end
     assert_empty actual_stdout
     assert_equal(expected, actual_stderr)
+    assert_empty specification.unresolved_deps
+  end
+
+  def test_unresolved_specs_with_duplicated_versions
+    specification = Gem::Specification.clone
+
+    set_orig specification
+
+    specification.instance_variable_set(:@unresolved_deps, { b: Gem::Dependency.new("x","1") })
+
+    specification.define_singleton_method(:find_all_by_name) do |_dep_name|
+      [
+        specification.new {|s| s.name = "z", s.version = Gem::Version.new("1") }, # default copy
+        specification.new {|s| s.name = "z", s.version = Gem::Version.new("1") }, # regular copy
+        specification.new {|s| s.name = "z", s.version = Gem::Version.new("2") }, # regular copy
+      ]
+    end
+
+    expected = <<-EXPECTED
+WARN: Unresolved or ambiguous specs during Gem::Specification.reset:
+      x (= 1)
+      Available/installed versions of this gem:
+      - 1
+      - 2
+WARN: Clearing out unresolved specs. Try 'gem cleanup <gem>'
+Please report a bug if this causes problems.
+    EXPECTED
+
+    actual_stdout, actual_stderr = capture_output do
+      specification.reset
+    end
+    assert_empty actual_stdout
+    assert_equal(expected, actual_stderr)
+    assert_empty specification.unresolved_deps
+  end
+
+  def test_unresolved_specs_with_unrestricted_deps_on_default_gems
+    specification = Gem::Specification.clone
+
+    set_orig specification
+
+    spec = new_default_spec "stringio", "3.1.1"
+
+    specification.instance_variable_set(:@unresolved_deps, { stringio: Gem::Dependency.new("stringio", ">= 0") })
+
+    specification.define_singleton_method(:find_all_by_name) do |_dep_name|
+      [spec]
+    end
+
+    actual_stdout, actual_stderr = capture_output do
+      specification.reset
+    end
+    assert_empty actual_stdout
+    assert_empty actual_stderr
   end
 
   def test_duplicate_runtime_dependency
     expected = "WARNING: duplicated b dependency [\"~> 3.0\", \"~> 3.0\"]\n"
     out, err = capture_output do
-      @a1.add_runtime_dependency "b", "~> 3.0", "~> 3.0"
+      @a1.add_dependency "b", "~> 3.0", "~> 3.0"
     end
     assert_empty out
     assert_equal(expected, err)
   end
 
   def set_orig(cls)
+    assert_empty cls.unresolved_deps
+
     s_cls = cls.singleton_class
-    s_cls.send :alias_method, :orig_unresolved_deps, :unresolved_deps
     s_cls.send :alias_method, :orig_find_all_by_name, :find_all_by_name
   end
 
@@ -3116,7 +3269,7 @@ or set it to nil if you don't want to specify a license.
   end
 
   def test_removed_methods
-    assert_equal Gem::Specification::REMOVED_METHODS, [:rubyforge_project=]
+    assert_equal Gem::Specification::REMOVED_METHODS, [:rubyforge_project=, :mark_version]
   end
 
   def test_validate_removed_rubyforge_project
@@ -3409,12 +3562,17 @@ Did you mean 'Ruby'?
     util_setup_validate
 
     @a1.rubygems_version = "3"
-    e = assert_raise Gem::InvalidSpecificationException do
+
+    use_ui @ui do
       @a1.validate
     end
 
-    assert_equal "expected RubyGems version #{Gem::VERSION}, was 3",
-                 e.message
+    expected = <<~EXPECTED
+      #{w}:  expected RubyGems version #{Gem::VERSION}, was 3
+      #{w}:  See https://guides.rubygems.org/specification-reference/ for help
+    EXPECTED
+
+    assert_equal expected, @ui.error
   end
 
   def test_validate_specification_version
@@ -3496,6 +3654,8 @@ Did you mean 'Ruby'?
   end
 
   def test__load_fixes_Date_objects
+    pend "Marshal.load of links and floats is broken on truffleruby, see https://github.com/oracle/truffleruby/issues/3747" if RUBY_ENGINE == "truffleruby"
+
     spec = util_spec "a", 1
     spec.instance_variable_set :@date, Date.today
 
@@ -3660,6 +3820,7 @@ Did you mean 'Ruby'?
 
     Dir.chdir @tempdir do
       @m2 = quick_gem "m", "2" do |s|
+        s.required_ruby_version = ">= 2.3.0"
         s.files = %w[lib/code.rb]
         s.licenses = "BSD-2-Clause"
         s.metadata = {
@@ -3719,7 +3880,6 @@ end
   end
 
   def test_missing_extensions_eh
-    pend "extensions don't quite work on jruby" if Gem.java_platform?
     ext_spec
 
     assert @ext.missing_extensions?
@@ -3798,6 +3958,13 @@ end
     assert Gem::Specification.find_by_name "q"
   end
 
+  def test_find_by_name_with_only_prereleases_with_requirements
+    q = util_spec "q", "2.a"
+    install_specs q
+
+    assert Gem::Specification.find_by_name "q", ">= 1"
+  end
+
   def test_find_by_name_prerelease
     b = util_spec "b", "2.a"
 
@@ -3865,6 +4032,40 @@ end
     end
     Gem::Specification.reset
     assert_equal ["default-2.0.0.0"], Gem::Specification.map(&:full_name)
+  end
+
+  def test_validate_for_resolution_validates_required_attributes
+    e = assert_raise Gem::InvalidSpecificationException do
+      @a1.name = nil
+      @a1.validate_for_resolution
+    end
+
+    assert_equal "missing value for attribute name", e.message
+  end
+
+  def test_validate_for_resolution_validates_name
+    e = assert_raise Gem::InvalidSpecificationException do
+      @a1.name = 123
+      @a1.validate_for_resolution
+    end
+
+    assert_equal 'invalid value for attribute name: "123" must be a string', e.message
+  end
+
+  def test_validate_for_resolution_validates_duplicate_dependencies
+    e = assert_raise Gem::InvalidSpecificationException do
+      @a1.add_dependency "foo", "1.2.3"
+      @a1.add_dependency "foo", "3.4.5"
+      @a1.validate_for_resolution
+    end
+
+    assert_match "duplicate dependency on foo", e.message
+  end
+
+  def test_validate_for_resolution_ignores_metadata
+    @a1.summary = "TODO: Invalid summary"
+    @a1.metadata["homepage_uri"] = "TODO: Invalid homepage URI"
+    @a1.validate_for_resolution
   end
 
   def util_setup_deps

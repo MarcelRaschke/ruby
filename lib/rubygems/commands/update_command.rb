@@ -197,18 +197,17 @@ command to remove old versions.
       yield
     else
       require "tmpdir"
-      tmpdir = Dir.mktmpdir
-      FileUtils.mv Gem.plugindir, tmpdir
+      Dir.mktmpdir("gem_update") do |tmpdir|
+        FileUtils.mv Gem.plugindir, tmpdir
 
-      status = yield
+        status = yield
 
-      if status
-        FileUtils.rm_rf tmpdir
-      else
-        FileUtils.mv File.join(tmpdir, "plugins"), Gem.plugindir
+        unless status
+          FileUtils.mv File.join(tmpdir, "plugins"), Gem.plugindir
+        end
+
+        status
       end
-
-      status
     end
   end
 
@@ -318,16 +317,10 @@ command to remove old versions.
 
   #
   # Oldest version we support downgrading to. This is the version that
-  # originally ships with the first patch version of each ruby, because we never
-  # test each ruby against older rubygems, so we can't really guarantee it
-  # works. Version list can be checked here: https://stdgems.org/rubygems
+  # originally ships with the oldest supported patch version of ruby.
   #
   def oldest_supported_version
     @oldest_supported_version ||=
-      if Gem.ruby_version > Gem::Version.new("3.1.a")
-        Gem::Version.new("3.3.3")
-      else
-        Gem::Version.new("3.2.3")
-      end
+      Gem::Version.new("3.3.3")
   end
 end

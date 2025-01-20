@@ -1,8 +1,11 @@
+# frozen_string_literal: true
+
 require "forwardable"
-require "lrama/grammar/code/initial_action_code"
-require "lrama/grammar/code/no_reference_code"
-require "lrama/grammar/code/printer_code"
-require "lrama/grammar/code/rule_action"
+require_relative "code/destructor_code"
+require_relative "code/initial_action_code"
+require_relative "code/no_reference_code"
+require_relative "code/printer_code"
+require_relative "code/rule_action"
 
 module Lrama
   class Grammar
@@ -28,7 +31,7 @@ module Lrama
       def translated_code
         t_code = s_value.dup
 
-        references.reverse.each do |ref|
+        references.reverse_each do |ref|
           first_column = ref.first_column
           last_column = ref.last_column
 

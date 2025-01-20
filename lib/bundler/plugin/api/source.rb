@@ -107,7 +107,7 @@ module Bundler
         def install_path
           @install_path ||=
             begin
-              base_name = File.basename(Bundler::URI.parse(uri).normalize.path)
+              base_name = File.basename(Gem::URI.parse(uri).normalize.path)
 
               gem_install_dir.join("#{base_name}-#{uri_hash[0..11]}")
             end
@@ -131,7 +131,7 @@ module Bundler
           Bundler::Index.build do |index|
             files.each do |file|
               next unless spec = Bundler.load_gemspec(file)
-              Bundler.rubygems.set_installed_by_version(spec)
+              spec.installed_by_version = Gem::VERSION
 
               spec.source = self
               Bundler.rubygems.validate(spec)
@@ -176,7 +176,7 @@ module Bundler
         #
         # This is used by `app_cache_path`
         def app_cache_dirname
-          base_name = File.basename(Bundler::URI.parse(uri).normalize.path)
+          base_name = File.basename(Gem::URI.parse(uri).normalize.path)
           "#{base_name}-#{uri_hash}"
         end
 
@@ -196,6 +196,7 @@ module Bundler
 
           FileUtils.rm_rf(new_cache_path)
           FileUtils.cp_r(install_path, new_cache_path)
+          FileUtils.rm_rf(app_cache_path.join(".git"))
           FileUtils.touch(app_cache_path.join(".bundlecache"))
         end
 

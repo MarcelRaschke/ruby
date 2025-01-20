@@ -5,9 +5,8 @@ class Reline::MacroTest < Reline::TestCase
     Reline.send(:test_mode)
     @config = Reline::Config.new
     @encoding = Reline.core.encoding
-    @line_editor = Reline::LineEditor.new(@config, @encoding)
-    @line_editor.instance_variable_set(:@screen_size, [24, 80])
-    @output = @line_editor.output = File.open(IO::NULL, "w")
+    @line_editor = Reline::LineEditor.new(@config)
+    @output = Reline::IOGate.output = File.open(IO::NULL, "w")
   end
 
   def teardown
@@ -15,12 +14,12 @@ class Reline::MacroTest < Reline::TestCase
     Reline.test_reset
   end
 
-  def input_key(char, combined_char = char, with_meta = false)
-    @line_editor.input_key(Reline::Key.new(char, combined_char, with_meta))
+  def input_key(char, method_symbol = :ed_insert)
+    @line_editor.input_key(Reline::Key.new(char, method_symbol, false))
   end
 
   def input(str)
-    str.each_byte {|c| input_key(c)}
+    str.each_char {|c| input_key(c)}
   end
 
   def test_simple_input
@@ -34,7 +33,7 @@ class Reline::MacroTest < Reline::TestCase
     end
     input('abc')
     assert_nothing_raised(ArgumentError) {
-      input_key(:delete_char)
+      input_key('x', :delete_char)
     }
     assert_equal 'ab', @line_editor.line
   end

@@ -153,12 +153,13 @@ class TestFiberIO < Test::Unit::TestCase
       Fiber.set_scheduler scheduler
 
       Fiber.schedule do
-        message = i.read(20)
+        # We add 1 here, to force the read to block (testing that specific code path).
+        message = i.read(MESSAGE.bytesize + 1)
         i.close
       end
 
       Fiber.schedule do
-        o.write("Hello World")
+        o.write(MESSAGE)
         o.close
       end
     end
@@ -233,5 +234,46 @@ class TestFiberIO < Test::Unit::TestCase
     thread.join
 
     assert_equal "ok\n", result
+  end
+
+  # Tests for https://bugs.ruby-lang.org/issues/20723 which would
+  # otherwise deadlock this test.
+  def test_close_while_reading_on_thread
+    # Windows has UNIXSocket, but only with VS 2019+
+    omit "UNIXSocket is not defined!" unless defined?(UNIXSocket)
+
+    i, o = Socket.pair(:UNIX, :STREAM)
+    if RUBY_PLATFORM=~/mswin|mingw/
+      i.nonblock = true
+      o.nonblock = true
+    end
+
+    reading_thread = Thread.new do
+      Thread.current.report_on_exception = false
+      i.wait_readable
+    end
+
+    fs_thread = Thread.new do
+      # Wait until the reading thread is blocked on read:
+      Thread.pass until reading_thread.status == "sleep"
+
+      scheduler = Scheduler.new
+      Fiber.set_scheduler scheduler
+      Fiber.schedule do
+        i.close
+      end
+    end
+
+    assert_raise(IOError) { reading_thread.join }
+    refute_nil fs_thread.join(5), "expected thread to terminate within 5 seconds"
+
+    assert_predicate(i, :closed?)
+  ensure
+    fs_thread&.kill
+    fs_thread&.join rescue nil
+    reading_thread&.kill
+    reading_thread&.join rescue nil
+    i&.close
+    o&.close
   end
 end

@@ -17,9 +17,8 @@ require "pp"
 require "rubygems/package"
 require "shellwords"
 require "tmpdir"
-require "uri"
+require "rubygems/vendor/uri/lib/uri"
 require "zlib"
-require "benchmark" # stdlib
 require_relative "mock_gem_ui"
 
 module Gem
@@ -283,9 +282,12 @@ class Gem::TestCase < Test::Unit::TestCase
   def setup
     @orig_hooks = {}
     @orig_env = ENV.to_hash
-    @tmp = File.expand_path("../../tmp", __dir__)
 
-    FileUtils.mkdir_p @tmp
+    top_srcdir = __dir__ + "/../.."
+    @tmp = File.expand_path(ENV.fetch("GEM_TEST_TMPDIR", "tmp"), top_srcdir)
+
+    FileUtils.mkdir_p(@tmp, mode: 0o700) # =rwx
+    @tmp = File.realpath(@tmp)
 
     @tempdir = Dir.mktmpdir("test_rubygems_", @tmp)
 
@@ -349,11 +351,16 @@ class Gem::TestCase < Test::Unit::TestCase
     Dir.chdir @tempdir
 
     ENV["HOME"] = @userhome
+    # Remove "RUBY_CODESIGN", which is used by mkmf-generated Makefile to
+    # sign extension bundles on macOS, to avoid trying to find the specified key
+    # from the fake $HOME/Library/Keychains directory.
+    ENV.delete "RUBY_CODESIGN"
     Gem.instance_variable_set :@config_file, nil
     Gem.instance_variable_set :@user_home, nil
     Gem.instance_variable_set :@config_home, nil
     Gem.instance_variable_set :@data_home, nil
     Gem.instance_variable_set :@state_home, @statehome
+    Gem.instance_variable_set :@state_file, nil
     Gem.instance_variable_set :@gemdeps, nil
     Gem.instance_variable_set :@env_requirements_by_name, nil
     Gem.send :remove_instance_variable, :@ruby_version if
@@ -395,7 +402,7 @@ class Gem::TestCase < Test::Unit::TestCase
     Gem::RemoteFetcher.fetcher = Gem::FakeFetcher.new
 
     @gem_repo = "http://gems.example.com/"
-    @uri = URI.parse @gem_repo
+    @uri = Gem::URI.parse @gem_repo
     Gem.sources.replace [@gem_repo]
 
     Gem.searcher = nil
@@ -441,9 +448,7 @@ class Gem::TestCase < Test::Unit::TestCase
 
     Dir.chdir @current_dir
 
-    FileUtils.rm_rf @tempdir
-
-    restore_env
+    ENV.replace(@orig_env)
 
     Gem::ConfigFile.send :remove_const, :SYSTEM_WIDE_CONFIG_FILE
     Gem::ConfigFile.send :const_set, :SYSTEM_WIDE_CONFIG_FILE,
@@ -470,6 +475,10 @@ class Gem::TestCase < Test::Unit::TestCase
     end
 
     @back_ui.close
+
+    FileUtils.rm_rf @tempdir
+
+    refute_directory_exists @tempdir, "#{@tempdir} used by test #{method_name} is still in use"
   end
 
   def credential_setup
@@ -522,6 +531,16 @@ class Gem::TestCase < Test::Unit::TestCase
 
   def without_any_upwards_gemfiles
     ENV["BUNDLE_GEMFILE"] = File.join(@tempdir, "Gemfile")
+  end
+
+  def with_env(overrides, &block)
+    orig_env = ENV.to_h
+    ENV.replace(overrides)
+    begin
+      block.call
+    ensure
+      ENV.replace(orig_env)
+    end
   end
 
   ##
@@ -796,8 +815,14 @@ class Gem::TestCase < Test::Unit::TestCase
     Gem::Specification.unresolved_deps.values.map(&:to_s).sort
   end
 
-  def new_default_spec(name, version, deps = nil, *files)
+  def new_default_spec(name, version, deps = nil, *files, executable: false)
     spec = util_spec name, version, deps
+
+    if executable
+      spec.executables = %w[executable]
+
+      write_file File.join(@tempdir, "bin", "executable")
+    end
 
     spec.loaded_from = File.join(@gemhome, "specifications", "default", spec.spec_name)
     spec.files = files
@@ -807,10 +832,8 @@ class Gem::TestCase < Test::Unit::TestCase
     Gem.instance_variable_set(:@default_gem_load_paths, [*Gem.send(:default_gem_load_paths), lib_dir])
     $LOAD_PATH.unshift(lib_dir)
     files.each do |file|
-      rb_path = File.join(lib_dir, file)
-      FileUtils.mkdir_p(File.dirname(rb_path))
-      File.open(rb_path, "w") do |rb|
-        rb << "# #{file}"
+      write_file File.join(lib_dir, file) do |io|
+        io.write "# #{file}"
       end
     end
 
@@ -1353,12 +1376,12 @@ Also, a list:
   #
   # Yields the +specification+ to the block, if given
 
-  def vendor_gem(name = "a", version = 1)
+  def vendor_gem(name = "a", version = 1, &block)
     directory = File.join "vendor", name
 
     FileUtils.mkdir_p directory
 
-    save_gemspec name, version, directory
+    save_gemspec name, version, directory, &block
   end
 
   ##
@@ -1509,23 +1532,6 @@ Also, a list:
     PUBLIC_KEY  = nil
     PUBLIC_CERT = nil
   end if Gem::HAVE_OPENSSL
-
-  private
-
-  def restore_env
-    unless Gem.win_platform?
-      ENV.replace(@orig_env)
-      return
-    end
-
-    # Fallback logic for Windows below to workaround
-    # https://bugs.ruby-lang.org/issues/16798. Can be dropped once all
-    # supported rubies include the fix for that.
-
-    ENV.clear
-
-    @orig_env.each {|k, v| ENV[k] = v }
-  end
 end
 
 # https://github.com/seattlerb/minitest/blob/13c48a03d84a2a87855a4de0c959f96800100357/lib/minitest/mock.rb#L192

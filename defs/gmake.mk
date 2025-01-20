@@ -37,7 +37,7 @@ TEST_TARGETS := $(patsubst test,test-short,$(TEST_TARGETS))
 TEST_DEPENDS := $(filter-out test $(TEST_TARGETS),$(TEST_DEPENDS))
 TEST_TARGETS := $(patsubst test-short,btest-ruby test-knownbug test-basic,$(TEST_TARGETS))
 TEST_TARGETS := $(patsubst test-basic,test-basic test-leaked-globals,$(TEST_TARGETS))
-TEST_TARGETS := $(patsubst test-bundled-gems,test-bundled-gems-run,$(TEST_TARGETS))
+TEST_TARGETS := $(patsubst test-bundled-gems,test-bundled-gems-spec test-bundled-gems-run,$(TEST_TARGETS))
 TEST_TARGETS := $(patsubst test-bundled-gems-run,test-bundled-gems-run $(PREPARE_BUNDLED_GEMS),$(TEST_TARGETS))
 TEST_TARGETS := $(patsubst test-bundled-gems-prepare,test-bundled-gems-prepare $(PRECHECK_BUNDLED_GEMS) test-bundled-gems-fetch,$(TEST_TARGETS))
 TEST_TARGETS := $(patsubst test-bundler-parallel,test-bundler-parallel $(PREPARE_BUNDLER),$(TEST_TARGETS))
@@ -97,6 +97,7 @@ ORDERED_TEST_TARGETS := $(filter $(TEST_TARGETS), \
 	test-bundler-prepare test-bundler test-bundler-parallel \
 	test-bundled-gems-precheck test-bundled-gems-fetch \
 	test-bundled-gems-prepare test-bundled-gems-run \
+	test-bundled-gems-spec \
 	)
 
 # grep ^yes-test-.*-precheck: template/Makefile.in defs/gmake.mk common.mk
@@ -193,7 +194,7 @@ $(SCRIPTBINDIR):
 	$(Q) mkdir $@
 
 .PHONY: commit
-COMMIT_PREPARE := $(filter-out commit do-commit,$(MAKECMDGOALS)) up
+COMMIT_PREPARE := $(subst :,\:,$(filter-out commit do-commit,$(MAKECMDGOALS))) up
 
 commit: pre-commit $(DOT_WAIT) do-commit $(DOT_WAIT) post_commit
 pre-commit: $(COMMIT_PREPARE)
@@ -469,6 +470,10 @@ benchmark/%: miniruby$(EXEEXT) update-benchmark-driver PHONY
 	            --executables="built-ruby::$(BENCH_RUBY) --disable-gem" \
 	            $(srcdir)/$@ $(BENCH_OPTS) $(OPTS)
 
+clean-local:: TARGET_SO = $(PROGRAM) $(WPROGRAM) $(LIBRUBY_SO) $(STATIC_RUBY) miniruby goruby
+clean-local::
+	-$(Q)$(RMALL) $(cleanlibs)
+
 clean-srcs-ext::
 	$(Q)$(RM) $(patsubst $(srcdir)/%,%,$(EXT_SRCS))
 
@@ -504,12 +509,17 @@ $(RUBYSPEC_CAPIEXT)/%.$(DLEXT): $(srcdir)/$(RUBYSPEC_CAPIEXT)/%.c $(srcdir)/$(RU
 	$(ECHO) building $@
 	$(Q) $(MAKEDIRS) $(@D)
 	$(Q) $(DLDSHARED) -L. $(XDLDFLAGS) $(XLDFLAGS) $(LDFLAGS) $(INCFLAGS) $(CPPFLAGS) $(OUTFLAG)$@ $< $(LIBRUBYARG)
+ifneq ($(POSTLINK),)
+	$(Q) $(POSTLINK)
+endif
 	$(Q) $(RMALL) $@.*
 
-rubyspec-capiext: $(patsubst %.c,$(RUBYSPEC_CAPIEXT)/%.$(DLEXT),$(notdir $(wildcard $(srcdir)/$(RUBYSPEC_CAPIEXT)/*.c)))
+RUBYSPEC_CAPIEXT_SO := $(patsubst %.c,$(RUBYSPEC_CAPIEXT)/%.$(DLEXT),$(notdir $(wildcard $(srcdir)/$(RUBYSPEC_CAPIEXT)/*.c)))
+rubyspec-capiext: $(RUBYSPEC_CAPIEXT_SO)
 	@ $(NULLCMD)
 
 ifeq ($(ENABLE_SHARED),yes)
+ruby: $(if $(LIBRUBY_SO_UPDATE),$(RUBYSPEC_CAPIEXT_SO))
 exts: rubyspec-capiext
 endif
 

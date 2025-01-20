@@ -3,142 +3,113 @@ class Reline::KeyStroke
   CSI_PARAMETER_BYTES_RANGE = 0x30..0x3f
   CSI_INTERMEDIATE_BYTES_RANGE = (0x20..0x2f)
 
-  def initialize(config)
+  attr_accessor :encoding
+
+  def initialize(config, encoding)
     @config = config
+    @encoding = encoding
   end
 
-  def compress_meta_key(ary)
-    return ary unless @config.convert_meta
-    ary.inject([]) { |result, key|
-      if result.size > 0 and result.last == "\e".ord
-        result[result.size - 1] = Reline::Key.new(key, key | 0b10000000, true)
-      else
-        result << key
-      end
-      result
-    }
-  end
-
-  def start_with?(me, other)
-    compressed_me = compress_meta_key(me)
-    compressed_other = compress_meta_key(other)
-    i = 0
-    loop do
-      my_c = compressed_me[i]
-      other_c = compressed_other[i]
-      other_is_last = (i + 1) == compressed_other.size
-      me_is_last = (i + 1) == compressed_me.size
-      if my_c != other_c
-        if other_c == "\e".ord and other_is_last and my_c.is_a?(Reline::Key) and my_c.with_meta
-          return true
-        else
-          return false
-        end
-      elsif other_is_last
-        return true
-      elsif me_is_last
-        return false
-      end
-      i += 1
-    end
-  end
-
-  def equal?(me, other)
-    case me
-    when Array
-      compressed_me = compress_meta_key(me)
-      compressed_other = compress_meta_key(other)
-      compressed_me.size == compressed_other.size and [compressed_me, compressed_other].transpose.all?{ |i| equal?(i[0], i[1]) }
-    when Integer
-      if other.is_a?(Reline::Key)
-        if other.combined_char == "\e".ord
-          false
-        else
-          other.combined_char == me
-        end
-      else
-        me == other
-      end
-    when Reline::Key
-      if other.is_a?(Integer)
-        me.combined_char == other
-      else
-        me == other
-      end
-    end
-  end
+  # Input exactly matches to a key sequence
+  MATCHING = :matching
+  # Input partially matches to a key sequence
+  MATCHED = :matched
+  # Input matches to a key sequence and the key sequence is a prefix of another key sequence
+  MATCHING_MATCHED = :matching_matched
+  # Input does not match to any key sequence
+  UNMATCHED = :unmatched
 
   def match_status(input)
-    key_mapping.keys.select { |lhs|
-      start_with?(lhs, input)
-    }.tap { |it|
-      return :matched  if it.size == 1 && equal?(it[0], input)
-      return :matching if it.size == 1 && !equal?(it[0], input)
-      return :matched  if it.max_by(&:size)&.size&.< input.size
-      return :matching if it.size > 1
-    }
-    if key_mapping.keys.any? { |lhs| start_with?(input, lhs) }
-      :matched
+    matching = key_mapping.matching?(input)
+    matched = key_mapping.get(input)
+    if matching && matched
+      MATCHING_MATCHED
+    elsif matching
+      MATCHING
+    elsif matched
+      MATCHED
+    elsif input[0] == ESC_BYTE
+      match_unknown_escape_sequence(input, vi_mode: @config.editing_mode_is?(:vi_insert, :vi_command))
     else
-      match_unknown_escape_sequence(input).first
+      s = input.pack('c*').force_encoding(@encoding)
+      if s.valid_encoding?
+        s.size == 1 ? MATCHED : UNMATCHED
+      else
+        # Invalid string is MATCHING (part of valid string) or MATCHED (invalid bytes to be ignored)
+        MATCHING_MATCHED
+      end
     end
   end
 
   def expand(input)
-    lhs = key_mapping.keys.select { |item| start_with?(input, item) }.sort_by(&:size).last
-    unless lhs
-      status, size = match_unknown_escape_sequence(input)
-      case status
-      when :matched
-        return [:ed_unassigned] + expand(input.drop(size))
-      when :matching
-        return [:ed_unassigned]
+    matched_bytes = nil
+    (1..input.size).each do |i|
+      bytes = input.take(i)
+      status = match_status(bytes)
+      matched_bytes = bytes if status == MATCHED || status == MATCHING_MATCHED
+      break if status == MATCHED || status == UNMATCHED
+    end
+    return [[], []] unless matched_bytes
+
+    func = key_mapping.get(matched_bytes)
+    s = matched_bytes.pack('c*').force_encoding(@encoding)
+    if func.is_a?(Array)
+      # Perform simple macro expansion for single byte key bindings.
+      # Multibyte key bindings and recursive macro expansion are not supported yet.
+      macro = func.pack('c*').force_encoding(@encoding)
+      keys = macro.chars.map do |c|
+        f = key_mapping.get(c.bytes)
+        Reline::Key.new(c, f.is_a?(Symbol) ? f : :ed_insert, false)
+      end
+    elsif func
+      keys = [Reline::Key.new(s, func, false)]
+    else
+      if s.valid_encoding? && s.size == 1
+        keys = [Reline::Key.new(s, :ed_insert, false)]
       else
-        return input
+        keys = []
       end
     end
-    rhs = key_mapping[lhs]
 
-    case rhs
-    when String
-      rhs_bytes = rhs.bytes
-      expand(expand(rhs_bytes) + expand(input.drop(lhs.size)))
-    when Symbol
-      [rhs] + expand(input.drop(lhs.size))
-    when Array
-      rhs
-    end
+    [keys, input.drop(matched_bytes.size)]
   end
 
   private
 
   # returns match status of CSI/SS3 sequence and matched length
-  def match_unknown_escape_sequence(input)
+  def match_unknown_escape_sequence(input, vi_mode: false)
     idx = 0
-    return [:unmatched, nil] unless input[idx] == ESC_BYTE
+    return UNMATCHED unless input[idx] == ESC_BYTE
     idx += 1
     idx += 1 if input[idx] == ESC_BYTE
 
     case input[idx]
     when nil
-      return [:matching, nil]
+      if idx == 1 # `ESC`
+        return MATCHING_MATCHED
+      else # `ESC ESC`
+        return MATCHING
+      end
     when 91 # == '['.ord
-      # CSI sequence
+      # CSI sequence `ESC [ ... char`
       idx += 1
       idx += 1 while idx < input.size && CSI_PARAMETER_BYTES_RANGE.cover?(input[idx])
       idx += 1 while idx < input.size && CSI_INTERMEDIATE_BYTES_RANGE.cover?(input[idx])
-      input[idx] ? [:matched, idx + 1] : [:matching, nil]
     when 79 # == 'O'.ord
-      # SS3 sequence
-      input[idx + 1] ? [:matched, idx + 2] : [:matching, nil]
+      # SS3 sequence `ESC O char`
+      idx += 1
     else
-      if idx == 1
-        # `ESC char`, make it :unmatched so that it will be handled correctly in `read_2nd_character_of_key_sequence`
-        [:unmatched, nil]
-      else
-        # `ESC ESC char`
-        [:matched, idx + 1]
-      end
+      # `ESC char` or `ESC ESC char`
+      return UNMATCHED if vi_mode
+    end
+
+    case input.size
+    when idx
+      MATCHING
+    when idx + 1
+      MATCHED
+    else
+      UNMATCHED
     end
   end
 

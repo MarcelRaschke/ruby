@@ -40,7 +40,7 @@ require 'socket'
 #   p ipaddr3                   #=> #<IPAddr: IPv4:192.168.2.0/255.255.255.0>
 
 class IPAddr
-  VERSION = "1.2.6"
+  VERSION = "1.2.7"
 
   # 32 bit mask for IPv4
   IN4MASK = 0xffffffff
@@ -52,7 +52,7 @@ class IPAddr
   # Regexp _internally_ used for parsing IPv4 address.
   RE_IPV4ADDRLIKE = %r{
     \A
-    (\d+) \. (\d+) \. (\d+) \. (\d+)
+    \d+ \. \d+ \. \d+ \. \d+
     \z
   }x
 
@@ -225,6 +225,28 @@ class IPAddr
     end
 
     return str
+  end
+
+  # Returns a string containing the IP address representation with prefix.
+  def as_json(*)
+    if ipv4? && prefix == 32
+      to_s
+    elsif ipv6? && prefix == 128
+      to_s
+    else
+      cidr
+    end
+  end
+
+  # Returns a json string containing the IP address representation.
+  def to_json(*a)
+    %Q{"#{as_json(*a)}"}
+  end
+
+  # Returns a string containing the IP address representation in
+  # cidr notation
+  def cidr
+    "#{to_s}/#{prefix}"
   end
 
   # Returns a network byte ordered string form of the IP address.
@@ -471,6 +493,20 @@ class IPAddr
     _to_string(@mask_addr)
   end
 
+  # Returns the wildcard mask in string format e.g. 0.0.255.255
+  def wildcard_mask
+    case @family
+    when Socket::AF_INET
+      mask = IN4MASK ^ @mask_addr
+    when Socket::AF_INET6
+      mask = IN6MASK ^ @mask_addr
+    else
+      raise AddressFamilyError, "unsupported address family"
+    end
+
+    _to_string(mask)
+  end
+
   # Returns the IPv6 zone identifier, if present.
   # Raises InvalidAddressError if not an IPv6 address.
   def zone_id
@@ -669,12 +705,12 @@ class IPAddr
     when Array
       octets = addr
     else
-      m = RE_IPV4ADDRLIKE.match(addr) or return nil
-      octets = m.captures
+      RE_IPV4ADDRLIKE.match?(addr) or return nil
+      octets = addr.split('.')
     end
     octets.inject(0) { |i, s|
       (n = s.to_i) < 256 or raise InvalidAddressError, "invalid address: #{@addr}"
-      s.match(/\A0./) and raise InvalidAddressError, "zero-filled number in IPv4 address is ambiguous: #{@addr}"
+      (s != '0') && s.start_with?('0') and raise InvalidAddressError, "zero-filled number in IPv4 address is ambiguous: #{@addr}"
       i << 8 | n
     }
   end

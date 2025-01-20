@@ -20,18 +20,21 @@ class TC_IPAddr < Test::Unit::TestCase
     a = IPAddr.new
     assert_equal("::", a.to_s)
     assert_equal("0000:0000:0000:0000:0000:0000:0000:0000", a.to_string)
+    assert_equal("::/128", a.cidr)
     assert_equal(Socket::AF_INET6, a.family)
     assert_equal(128, a.prefix)
 
     a = IPAddr.new("0123:4567:89ab:cdef:0ABC:DEF0:1234:5678")
     assert_equal("123:4567:89ab:cdef:abc:def0:1234:5678", a.to_s)
     assert_equal("0123:4567:89ab:cdef:0abc:def0:1234:5678", a.to_string)
+    assert_equal("123:4567:89ab:cdef:abc:def0:1234:5678/128", a.cidr)
     assert_equal(Socket::AF_INET6, a.family)
     assert_equal(128, a.prefix)
 
     a = IPAddr.new("3ffe:505:2::/48")
     assert_equal("3ffe:505:2::", a.to_s)
     assert_equal("3ffe:0505:0002:0000:0000:0000:0000:0000", a.to_string)
+    assert_equal("3ffe:505:2::/48", a.cidr)
     assert_equal(Socket::AF_INET6, a.family)
     assert_equal(false, a.ipv4?)
     assert_equal(true, a.ipv6?)
@@ -41,6 +44,7 @@ class TC_IPAddr < Test::Unit::TestCase
     a = IPAddr.new("3ffe:505:2::/ffff:ffff:ffff::")
     assert_equal("3ffe:505:2::", a.to_s)
     assert_equal("3ffe:0505:0002:0000:0000:0000:0000:0000", a.to_string)
+    assert_equal("3ffe:505:2::/48", a.cidr)
     assert_equal(Socket::AF_INET6, a.family)
     assert_equal(48, a.prefix)
     assert_nil(a.zone_id)
@@ -58,12 +62,14 @@ class TC_IPAddr < Test::Unit::TestCase
     a = IPAddr.new("0.0.0.0")
     assert_equal("0.0.0.0", a.to_s)
     assert_equal("0.0.0.0", a.to_string)
+    assert_equal("0.0.0.0/32", a.cidr)
     assert_equal(Socket::AF_INET, a.family)
     assert_equal(32, a.prefix)
 
     a = IPAddr.new("192.168.1.2")
     assert_equal("192.168.1.2", a.to_s)
     assert_equal("192.168.1.2", a.to_string)
+    assert_equal("192.168.1.2/32", a.cidr)
     assert_equal(Socket::AF_INET, a.family)
     assert_equal(true, a.ipv4?)
     assert_equal(false, a.ipv6?)
@@ -72,6 +78,7 @@ class TC_IPAddr < Test::Unit::TestCase
     a = IPAddr.new("192.168.1.2/26")
     assert_equal("192.168.1.0", a.to_s)
     assert_equal("192.168.1.0", a.to_string)
+    assert_equal("192.168.1.0/26", a.cidr)
     assert_equal(Socket::AF_INET, a.family)
     assert_equal("#<IPAddr: IPv4:192.168.1.0/255.255.255.192>", a.inspect)
     assert_equal(26, a.prefix)
@@ -79,6 +86,7 @@ class TC_IPAddr < Test::Unit::TestCase
     a = IPAddr.new("192.168.1.2/255.255.255.0")
     assert_equal("192.168.1.0", a.to_s)
     assert_equal("192.168.1.0", a.to_string)
+    assert_equal("192.168.1.0/24", a.cidr)
     assert_equal(Socket::AF_INET, a.family)
     assert_equal(24, a.prefix)
 
@@ -252,6 +260,20 @@ class TC_IPAddr < Test::Unit::TestCase
     assert_equal("3ffe:505:2::1", IPAddr.new("3ffe:505:2::1").to_s)
   end
 
+  def test_as_json
+    assert_equal("192.168.1.2", IPAddr.new("192.168.1.2").as_json)
+    assert_equal("192.168.1.0/24", IPAddr.new("192.168.1.2/24").as_json)
+    assert_equal("2001:200:300::1", IPAddr.new("2001:200:300::1").as_json)
+    assert_equal("2001:200:300::/48", IPAddr.new("2001:200:300::/48").as_json)
+  end
+
+  def test_to_json
+    assert_equal("\"192.168.1.2\"", IPAddr.new("192.168.1.2").to_json)
+    assert_equal("\"192.168.1.0/24\"", IPAddr.new("192.168.1.2/24").to_json)
+    assert_equal("\"2001:200:300::1\"", IPAddr.new("2001:200:300::1").to_json)
+    assert_equal("\"2001:200:300::/48\"", IPAddr.new("2001:200:300::/48").to_json)
+  end
+
   def test_netmask
     a = IPAddr.new("192.168.1.2/8")
     assert_equal(a.netmask, "255.0.0.0")
@@ -261,6 +283,29 @@ class TC_IPAddr < Test::Unit::TestCase
 
     a = IPAddr.new("192.168.1.2/24")
     assert_equal(a.netmask, "255.255.255.0")
+  end
+
+  def test_wildcard_mask
+    a = IPAddr.new("192.168.1.2/1")
+    assert_equal(a.wildcard_mask, "127.255.255.255")
+
+    a = IPAddr.new("192.168.1.2/8")
+    assert_equal(a.wildcard_mask, "0.255.255.255")
+
+    a = IPAddr.new("192.168.1.2/16")
+    assert_equal(a.wildcard_mask, "0.0.255.255")
+
+    a = IPAddr.new("192.168.1.2/24")
+    assert_equal(a.wildcard_mask, "0.0.0.255")
+
+    a = IPAddr.new("192.168.1.2/32")
+    assert_equal(a.wildcard_mask, "0.0.0.0")
+
+    a = IPAddr.new("3ffe:505:2::/48")
+    assert_equal(a.wildcard_mask, "0000:0000:0000:ffff:ffff:ffff:ffff:ffff")
+
+    a = IPAddr.new("3ffe:505:2::/128")
+    assert_equal(a.wildcard_mask, "0000:0000:0000:0000:0000:0000:0000:0000")
   end
 
   def test_zone_id

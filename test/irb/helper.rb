@@ -1,5 +1,6 @@
 require "test/unit"
 require "pathname"
+require "rubygems"
 
 begin
   require_relative "../lib/helper"
@@ -17,6 +18,7 @@ module IRB
 end
 
 module TestIRB
+  RUBY_3_4 = Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.4.0.dev")
   class TestCase < Test::Unit::TestCase
     class TestInputMethod < ::IRB::InputMethod
       attr_reader :list, :line_no
@@ -45,6 +47,19 @@ module TestIRB
 
     def ruby_core?
       !Pathname(__dir__).join("../../", "irb.gemspec").exist?
+    end
+
+    def setup_envs(home:)
+      @backup_home = ENV["HOME"]
+      ENV["HOME"] = home
+      @backup_xdg_config_home = ENV.delete("XDG_CONFIG_HOME")
+      @backup_irbrc = ENV.delete("IRBRC")
+    end
+
+    def teardown_envs
+      ENV["HOME"] = @backup_home
+      ENV["XDG_CONFIG_HOME"] = @backup_xdg_config_home
+      ENV["IRBRC"] = @backup_irbrc
     end
 
     def save_encodings
@@ -119,7 +134,9 @@ module TestIRB
       @envs["XDG_CONFIG_HOME"] ||= tmp_dir
       @envs["IRBRC"] = nil unless @envs.key?("IRBRC")
 
-      PTY.spawn(@envs.merge("TERM" => "dumb"), *cmd) do |read, write, pid|
+      envs_for_spawn = @envs.merge('TERM' => 'dumb', 'TEST_IRB_FORCE_INTERACTIVE' => 'true')
+
+      PTY.spawn(envs_for_spawn, *cmd) do |read, write, pid|
         Timeout.timeout(TIMEOUT_SEC) do
           while line = safe_gets(read)
             lines << line
@@ -194,7 +211,7 @@ module TestIRB
     end
 
     def write_ruby(program)
-      @ruby_file = Tempfile.create(%w{irb- .rb})
+      @ruby_file = Tempfile.create(%w{irbtest- .rb})
       @tmpfiles << @ruby_file
       @ruby_file.write(program)
       @ruby_file.close

@@ -35,8 +35,9 @@ typedef uint32_t redblack_id_t;
 # define INVALID_SHAPE_ID SHAPE_MASK
 # define ROOT_SHAPE_ID 0x0
 
-# define SPECIAL_CONST_SHAPE_ID (SIZE_POOL_COUNT * 2)
+# define SPECIAL_CONST_SHAPE_ID (ROOT_SHAPE_ID + 1)
 # define OBJ_TOO_COMPLEX_SHAPE_ID (SPECIAL_CONST_SHAPE_ID + 1)
+# define FIRST_T_OBJECT_SHAPE_ID (OBJ_TOO_COMPLEX_SHAPE_ID + 1)
 
 typedef struct redblack_node redblack_node_t;
 
@@ -46,7 +47,7 @@ struct rb_shape {
     attr_index_t next_iv_index;
     uint32_t capacity; // Total capacity of the object with this shape
     uint8_t type;
-    uint8_t size_pool_index;
+    uint8_t heap_index;
     shape_id_t parent_id;
     redblack_node_t * ancestor_index;
 };
@@ -150,12 +151,12 @@ int32_t rb_shape_id_offset(void);
 
 rb_shape_t * rb_shape_get_parent(rb_shape_t * shape);
 
-rb_shape_t* rb_shape_get_shape_by_id(shape_id_t shape_id);
-shape_id_t rb_shape_get_shape_id(VALUE obj);
+RUBY_FUNC_EXPORTED rb_shape_t *rb_shape_get_shape_by_id(shape_id_t shape_id);
+RUBY_FUNC_EXPORTED shape_id_t rb_shape_get_shape_id(VALUE obj);
 rb_shape_t * rb_shape_get_next_iv_shape(rb_shape_t * shape, ID id);
 bool rb_shape_get_iv_index(rb_shape_t * shape, ID id, attr_index_t * value);
 bool rb_shape_get_iv_index_with_hint(shape_id_t shape_id, ID id, attr_index_t * value, shape_id_t *shape_id_hint);
-bool rb_shape_obj_too_complex(VALUE obj);
+RUBY_FUNC_EXPORTED bool rb_shape_obj_too_complex(VALUE obj);
 
 void rb_shape_set_shape(VALUE obj, rb_shape_t* shape);
 rb_shape_t* rb_shape_get_shape(VALUE obj);
@@ -163,6 +164,7 @@ int rb_shape_frozen_shape_p(rb_shape_t* shape);
 rb_shape_t* rb_shape_transition_shape_frozen(VALUE obj);
 bool rb_shape_transition_shape_remove_ivar(VALUE obj, ID id, rb_shape_t *shape, VALUE * removed);
 rb_shape_t* rb_shape_get_next(rb_shape_t* shape, VALUE obj, ID id);
+rb_shape_t* rb_shape_get_next_no_warnings(rb_shape_t* shape, VALUE obj, ID id);
 
 rb_shape_t * rb_shape_rebuild_shape(rb_shape_t * initial_shape, rb_shape_t * dest_shape);
 

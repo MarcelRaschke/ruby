@@ -14,16 +14,13 @@ class RequirementChecker < Proc
   attr_accessor :provided
 
   def inspect
-    "\"!= #{provided}\""
+    "\"#{provided}\""
   end
 end
 
 RSpec.configure do |config|
   config.filter_run_excluding realworld: true
 
-  git_version = Bundler::Source::Git::GitProxy.new(nil, nil).version
-
-  config.filter_run_excluding git: RequirementChecker.against(git_version)
   config.filter_run_excluding bundler: RequirementChecker.against(Bundler::VERSION.split(".")[0])
   config.filter_run_excluding rubygems: RequirementChecker.against(Gem::VERSION)
   config.filter_run_excluding ruby_repo: !ENV["GEM_COMMAND"].nil?

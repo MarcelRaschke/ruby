@@ -277,8 +277,9 @@ numeric_getaddrinfo(const char *node, const char *service,
 void
 rb_freeaddrinfo(struct rb_addrinfo *ai)
 {
-    if (!ai->allocated_by_malloc)
-        freeaddrinfo(ai->ai);
+    if (!ai->allocated_by_malloc) {
+        if (ai->ai) freeaddrinfo(ai->ai);
+    }
     else {
         struct addrinfo *ai1, *ai2;
         ai1 = ai->ai;
@@ -326,6 +327,12 @@ nogvl_getaddrinfo(void *arg)
     return (void *)(VALUE)ret;
 }
 
+static void *
+fork_safe_getaddrinfo(void *arg)
+{
+    return rb_thread_prevent_fork(nogvl_getaddrinfo, arg);
+}
+
 static int
 rb_getaddrinfo(const char *hostp, const char *portp, const struct addrinfo *hints, struct addrinfo **ai)
 {
@@ -335,7 +342,7 @@ rb_getaddrinfo(const char *hostp, const char *portp, const struct addrinfo *hint
     arg.service = portp;
     arg.hints = hints;
     arg.res = ai;
-    return (int)(VALUE)rb_thread_call_without_gvl(nogvl_getaddrinfo, &arg, RUBY_UBF_IO, 0);
+    return (int)(VALUE)rb_thread_call_without_gvl(fork_safe_getaddrinfo, &arg, RUBY_UBF_IO, 0);
 }
 
 #elif GETADDRINFO_IMPL == 2
@@ -345,7 +352,7 @@ struct getaddrinfo_arg
     char *node, *service;
     struct addrinfo hints;
     struct addrinfo *ai;
-    int err, refcount, done, cancelled;
+    int err, gai_errno, refcount, done, cancelled;
     rb_nativethread_lock_t lock;
     rb_nativethread_cond_t cond;
 };
@@ -406,8 +413,9 @@ do_getaddrinfo(void *ptr)
 {
     struct getaddrinfo_arg *arg = (struct getaddrinfo_arg *)ptr;
 
-    int err;
+    int err, gai_errno;
     err = getaddrinfo(arg->node, arg->service, &arg->hints, &arg->ai);
+    gai_errno = errno;
 #ifdef __linux__
     /* On Linux (mainly Ubuntu 13.04) /etc/nsswitch.conf has mdns4 and
      * it cause getaddrinfo to return EAI_SYSTEM/ENOENT. [ruby-list:49420]
@@ -420,8 +428,9 @@ do_getaddrinfo(void *ptr)
     rb_nativethread_lock_lock(&arg->lock);
     {
         arg->err = err;
+        arg->gai_errno = gai_errno;
         if (arg->cancelled) {
-            freeaddrinfo(arg->ai);
+            if (arg->ai) freeaddrinfo(arg->ai);
         }
         else {
             arg->done = 1;
@@ -460,8 +469,8 @@ cancel_getaddrinfo(void *ptr)
     rb_nativethread_lock_unlock(&arg->lock);
 }
 
-static int
-do_pthread_create(pthread_t *th, void *(*start_routine) (void *), void *arg)
+int
+raddrinfo_pthread_create(pthread_t *th, void *(*start_routine) (void *), void *arg)
 {
     int limit = 3, ret;
     do {
@@ -474,12 +483,18 @@ do_pthread_create(pthread_t *th, void *(*start_routine) (void *), void *arg)
     return ret;
 }
 
+static void *
+fork_safe_do_getaddrinfo(void *ptr)
+{
+    return rb_thread_prevent_fork(do_getaddrinfo, ptr);
+}
+
 static int
 rb_getaddrinfo(const char *hostp, const char *portp, const struct addrinfo *hints, struct addrinfo **ai)
 {
     int retry;
     struct getaddrinfo_arg *arg;
-    int err;
+    int err = 0, gai_errno = 0;
 
 start:
     retry = 0;
@@ -490,9 +505,11 @@ start:
     }
 
     pthread_t th;
-    if (do_pthread_create(&th, do_getaddrinfo, arg) != 0) {
+    if (raddrinfo_pthread_create(&th, fork_safe_do_getaddrinfo, arg) != 0) {
+        int err = errno;
         free_getaddrinfo_arg(arg);
-        return EAI_AGAIN;
+        errno = err;
+        return EAI_SYSTEM;
     }
     pthread_detach(th);
 
@@ -503,10 +520,11 @@ start:
     {
         if (arg->done) {
             err = arg->err;
+            gai_errno = arg->gai_errno;
             if (err == 0) *ai = arg->ai;
         }
         else if (arg->cancelled) {
-            err = EAI_AGAIN;
+            retry = 1;
         }
         else {
             // If already interrupted, rb_thread_call_without_gvl2 may return without calling wait_getaddrinfo.
@@ -525,6 +543,10 @@ start:
     rb_thread_check_ints();
     if (retry) goto start;
 
+    /* Because errno is threadlocal, the errno value we got from the call to getaddrinfo() in the thread
+     * (in case of EAI_SYSTEM return value) is not propagated to the caller of _this_ function. Set errno
+     * explicitly, as round-tripped through struct getaddrinfo_arg, to deal with that */
+    if (gai_errno) errno = gai_errno;
     return err;
 }
 
@@ -591,7 +613,7 @@ struct getnameinfo_arg
     size_t hostlen;
     char *serv;
     size_t servlen;
-    int err, refcount, done, cancelled;
+    int err, gni_errno, refcount, done, cancelled;
     rb_nativethread_lock_t lock;
     rb_nativethread_cond_t cond;
 };
@@ -644,12 +666,14 @@ do_getnameinfo(void *ptr)
 {
     struct getnameinfo_arg *arg = (struct getnameinfo_arg *)ptr;
 
-    int err;
+    int err, gni_errno;
     err = getnameinfo(arg->sa, arg->salen, arg->host, (socklen_t)arg->hostlen, arg->serv, (socklen_t)arg->servlen, arg->flags);
+    gni_errno = errno;
 
     int need_free = 0;
     rb_nativethread_lock_lock(&arg->lock);
     arg->err = err;
+    arg->gni_errno = gni_errno;
     if (!arg->cancelled) {
         arg->done = 1;
         rb_native_cond_signal(&arg->cond);
@@ -691,7 +715,7 @@ rb_getnameinfo(const struct sockaddr *sa, socklen_t salen,
 {
     int retry;
     struct getnameinfo_arg *arg;
-    int err;
+    int err, gni_errno = 0;
 
 start:
     retry = 0;
@@ -702,9 +726,11 @@ start:
     }
 
     pthread_t th;
-    if (do_pthread_create(&th, do_getnameinfo, arg) != 0) {
+    if (raddrinfo_pthread_create(&th, do_getnameinfo, arg) != 0) {
+        int err = errno;
         free_getnameinfo_arg(arg);
-        return EAI_AGAIN;
+        errno = err;
+        return EAI_SYSTEM;
     }
     pthread_detach(th);
 
@@ -714,13 +740,14 @@ start:
     rb_nativethread_lock_lock(&arg->lock);
     if (arg->done) {
         err = arg->err;
+        gni_errno = arg->gni_errno;
         if (err == 0) {
             if (host) memcpy(host, arg->host, hostlen);
             if (serv) memcpy(serv, arg->serv, servlen);
         }
     }
     else if (arg->cancelled) {
-        err = EAI_AGAIN;
+        retry = 1;
     }
     else {
         // If already interrupted, rb_thread_call_without_gvl2 may return without calling wait_getnameinfo.
@@ -738,6 +765,9 @@ start:
     rb_thread_check_ints();
     if (retry) goto start;
 
+    /* Make sure we copy the thread-local errno value from the getnameinfo thread back to this thread, so
+     * calling code sees the correct errno */
+    if (gni_errno) errno = gni_errno;
     return err;
 }
 
@@ -792,7 +822,7 @@ str_is_number(const char *p)
     ((ptr)[0] == name[0] && \
      rb_strlen_lit(name) == (len) && memcmp(ptr, name, len) == 0)
 
-static char*
+char*
 host_str(VALUE host, char *hbuf, size_t hbuflen, int *flags_ptr)
 {
     if (NIL_P(host)) {
@@ -831,7 +861,7 @@ host_str(VALUE host, char *hbuf, size_t hbuflen, int *flags_ptr)
     }
 }
 
-static char*
+char*
 port_str(VALUE port, char *pbuf, size_t pbuflen, int *flags_ptr)
 {
     if (NIL_P(port)) {
@@ -2993,6 +3023,107 @@ rsock_io_socket_addrinfo(VALUE io, struct sockaddr *addr, socklen_t len)
 
     UNREACHABLE_RETURN(Qnil);
 }
+
+#if FAST_FALLBACK_INIT_INETSOCK_IMPL == 1
+
+void
+free_fast_fallback_getaddrinfo_shared(struct fast_fallback_getaddrinfo_shared **shared)
+{
+    xfree((*shared)->node);
+    (*shared)->node = NULL;
+    xfree((*shared)->service);
+    (*shared)->service = NULL;
+    rb_nativethread_lock_destroy(&(*shared)->lock);
+    free(*shared);
+    *shared = NULL;
+}
+
+void
+free_fast_fallback_getaddrinfo_entry(struct fast_fallback_getaddrinfo_entry **entry)
+{
+    if ((*entry)->ai) {
+        freeaddrinfo((*entry)->ai);
+        (*entry)->ai = NULL;
+    }
+    *entry = NULL;
+}
+
+static void *
+do_fast_fallback_getaddrinfo(void *ptr)
+{
+    struct fast_fallback_getaddrinfo_entry *entry = (struct fast_fallback_getaddrinfo_entry *)ptr;
+    struct fast_fallback_getaddrinfo_shared *shared = entry->shared;
+    int err = 0, need_free = 0, shared_need_free = 0;
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+    err = numeric_getaddrinfo(shared->node, shared->service, &entry->hints, &entry->ai);
+
+    if (err != 0) {
+        err = getaddrinfo(shared->node, shared->service, &entry->hints, &entry->ai);
+       #ifdef __linux__
+       /* On Linux (mainly Ubuntu 13.04) /etc/nsswitch.conf has mdns4 and
+        * it cause getaddrinfo to return EAI_SYSTEM/ENOENT. [ruby-list:49420]
+        */
+       if (err == EAI_SYSTEM && errno == ENOENT)
+           err = EAI_NONAME;
+       #endif
+    }
+
+    /* for testing HEv2 */
+    if (entry->test_sleep_ms > 0) {
+        struct timespec sleep_ts;
+        sleep_ts.tv_sec = entry->test_sleep_ms / 1000;
+        sleep_ts.tv_nsec = (entry->test_sleep_ms % 1000) * 1000000L;
+        if (sleep_ts.tv_nsec >= 1000000000L) {
+            sleep_ts.tv_sec += sleep_ts.tv_nsec / 1000000000L;
+            sleep_ts.tv_nsec = sleep_ts.tv_nsec % 1000000000L;
+        }
+        nanosleep(&sleep_ts, NULL);
+    }
+    if (entry->test_ecode != 0) {
+        err = entry->test_ecode;
+        if (entry->ai) {
+            freeaddrinfo(entry->ai);
+            entry->ai = NULL;
+        }
+    }
+
+    rb_nativethread_lock_lock(&shared->lock);
+    {
+        entry->err = err;
+        const char notification = entry->family == AF_INET6 ?
+        IPV6_HOSTNAME_RESOLVED : IPV4_HOSTNAME_RESOLVED;
+
+        if (shared->notify != -1 && (write(shared->notify, &notification, 1)) < 0) {
+            entry->err = errno;
+            entry->has_syserr = true;
+        }
+        if (--(entry->refcount) == 0) need_free = 1;
+        if (--(shared->refcount) == 0) shared_need_free = 1;
+    }
+    rb_nativethread_lock_unlock(&shared->lock);
+
+    if (need_free && entry) {
+        free_fast_fallback_getaddrinfo_entry(&entry);
+    }
+    if (shared_need_free && shared) {
+        free_fast_fallback_getaddrinfo_shared(&shared);
+    }
+
+    return 0;
+}
+
+void *
+fork_safe_do_fast_fallback_getaddrinfo(void *ptr)
+{
+    return rb_thread_prevent_fork(do_fast_fallback_getaddrinfo, ptr);
+}
+
+#endif
 
 /*
  * Addrinfo class

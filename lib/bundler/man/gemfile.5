@@ -1,6 +1,6 @@
-.\" generated with nRonn/v0.11.1
-.\" https://github.com/n-ronn/nronn/tree/0.11.1
-.TH "GEMFILE" "5" "December 2023" ""
+.\" generated with Ronn-NG/v0.10.1
+.\" http://github.com/apjanke/ronn-ng/tree/0.10.1
+.TH "GEMFILE" "5" "January 2025" ""
 .SH "NAME"
 \fBGemfile\fR \- A format for describing gem dependencies for Ruby programs
 .SH "SYNOPSIS"
@@ -72,7 +72,7 @@ A Ruby engine is an implementation of the Ruby language\.
 .IP "\(bu" 4
 For background: the reference or original implementation of the Ruby programming language is called Matz's Ruby Interpreter \fIhttps://en\.wikipedia\.org/wiki/Ruby_MRI\fR, or MRI for short\. This is named after Ruby creator Yukihiro Matsumoto, also known as Matz\. MRI is also known as CRuby, because it is written in C\. MRI is the most widely used Ruby engine\.
 .IP "\(bu" 4
-Other implementations \fIhttps://www\.ruby\-lang\.org/en/about/\fR of Ruby exist\. Some of the more well\-known implementations include JRuby \fIhttp://jruby\.org/\fR and TruffleRuby \fIhttps://www\.graalvm\.org/ruby/\fR\. Rubinius is an alternative implementation of Ruby written in Ruby\. JRuby is an implementation of Ruby on the JVM, short for Java Virtual Machine\. TruffleRuby is a Ruby implementation on the GraalVM, a language toolkit built on the JVM\.
+Other implementations \fIhttps://www\.ruby\-lang\.org/en/about/\fR of Ruby exist\. Some of the more well\-known implementations include JRuby \fIhttps://www\.jruby\.org/\fR and TruffleRuby \fIhttps://www\.graalvm\.org/ruby/\fR\. Rubinius is an alternative implementation of Ruby written in Ruby\. JRuby is an implementation of Ruby on the JVM, short for Java Virtual Machine\. TruffleRuby is a Ruby implementation on the GraalVM, a language toolkit built on the JVM\.
 .IP "" 0
 .SS "ENGINE VERSION"
 Each application \fImay\fR specify a Ruby engine version\. If an engine version is specified, an engine \fImust\fR also be specified\. If the engine is "ruby" the engine version specified \fImust\fR match the Ruby version\.
@@ -216,6 +216,8 @@ The following platform values are deprecated and should be replaced with \fBwind
 .IP "\(bu" 4
 \fBmswin\fR, \fBmswin64\fR, \fBmingw32\fR, \fBx64_mingw\fR
 .IP "" 0
+.P
+Note that, while unfortunately using the same terminology, the values of this option are different from the values that \fBbundle lock \-\-add\-platform\fR can take\. The values of this option are more closer to "Ruby Implementation" while the values that \fBbundle lock \-\-add\-platform\fR understands are more related to OS and architecture of the different systems where your lockfile will be used\.
 .SS "FORCE_RUBY_PLATFORM"
 If you always want the pure ruby variant of a gem to be chosen over platform specific variants, you can use the \fBforce_ruby_platform\fR option:
 .IP "" 4
@@ -449,7 +451,7 @@ end
 .fi
 .IP "" 0
 .SH "GEMSPEC"
-The \fB\.gemspec\fR \fIhttp://guides\.rubygems\.org/specification\-reference/\fR file is where you provide metadata about your gem to Rubygems\. Some required Gemspec attributes include the name, description, and homepage of your gem\. This is also where you specify the dependencies your gem needs to run\.
+The \fB\.gemspec\fR \fIhttps://guides\.rubygems\.org/specification\-reference/\fR file is where you provide metadata about your gem to Rubygems\. Some required Gemspec attributes include the name, description, and homepage of your gem\. This is also where you specify the dependencies your gem needs to run\.
 .P
 If you wish to use Bundler to help install dependencies for a gem while it is being developed, use the \fBgemspec\fR method to pull in the dependencies listed in the \fB\.gemspec\fR file\.
 .P

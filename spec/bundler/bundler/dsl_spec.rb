@@ -32,6 +32,13 @@ RSpec.describe Bundler::Dsl do
       expect(subject.dependencies.first.source.ref).to eq("refs/pull/5/head")
     end
 
+    it "converts :gitlab PR to URI using https" do
+      subject.gem("sparks", gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5")
+      gitlab_uri = "https://gitlab.com/indirect/sparks.git"
+      expect(subject.dependencies.first.source.uri).to eq(gitlab_uri)
+      expect(subject.dependencies.first.source.ref).to eq("refs/merge-requests/5/head")
+    end
+
     it "rejects :github PR URI with a branch, ref or tag" do
       expect do
         subject.gem("sparks", github: "https://github.com/indirect/sparks/pull/5", branch: "foo")
@@ -55,12 +62,44 @@ RSpec.describe Bundler::Dsl do
       )
     end
 
+    it "rejects :gitlab PR URI with a branch, ref or tag" do
+      expect do
+        subject.gem("sparks", gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5", branch: "foo")
+      end.to raise_error(
+        Bundler::GemfileError,
+        %(The :branch option can't be used with `gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5"`),
+      )
+
+      expect do
+        subject.gem("sparks", gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5", ref: "foo")
+      end.to raise_error(
+        Bundler::GemfileError,
+        %(The :ref option can't be used with `gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5"`),
+      )
+
+      expect do
+        subject.gem("sparks", gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5", tag: "foo")
+      end.to raise_error(
+        Bundler::GemfileError,
+        %(The :tag option can't be used with `gitlab: "https://gitlab.com/indirect/sparks/-/merge_requests/5"`),
+      )
+    end
+
     it "rejects :github with :git" do
       expect do
         subject.gem("sparks", github: "indirect/sparks", git: "https://github.com/indirect/sparks.git")
       end.to raise_error(
         Bundler::GemfileError,
         %(The :git option can't be used with `github: "indirect/sparks"`),
+      )
+    end
+
+    it "rejects :gitlab with :git" do
+      expect do
+        subject.gem("sparks", gitlab: "indirect/sparks", git: "https://gitlab.com/indirect/sparks.git")
+      end.to raise_error(
+        Bundler::GemfileError,
+        %(The :git option can't be used with `gitlab: "indirect/sparks"`),
       )
     end
 
@@ -75,6 +114,18 @@ RSpec.describe Bundler::Dsl do
         subject.gem("sparks", github: "rails")
         github_uri = "https://github.com/rails/rails.git"
         expect(subject.dependencies.first.source.uri).to eq(github_uri)
+      end
+
+      it "converts :gitlab to URI using https" do
+        subject.gem("sparks", gitlab: "indirect/sparks")
+        gitlab_uri = "https://gitlab.com/indirect/sparks.git"
+        expect(subject.dependencies.first.source.uri).to eq(gitlab_uri)
+      end
+
+      it "converts :gitlab shortcut to URI using https" do
+        subject.gem("sparks", gitlab: "rails")
+        gitlab_uri = "https://gitlab.com/rails/rails.git"
+        expect(subject.dependencies.first.source.uri).to eq(gitlab_uri)
       end
 
       it "converts numeric :gist to :git" do
@@ -103,8 +154,8 @@ RSpec.describe Bundler::Dsl do
     end
 
     context "default git sources" do
-      it "has bitbucket, gist, and github" do
-        expect(subject.instance_variable_get(:@git_sources).keys.sort).to eq(%w[bitbucket gist github])
+      it "has bitbucket, gist, github, and gitlab" do
+        expect(subject.instance_variable_get(:@git_sources).keys.sort).to eq(%w[bitbucket gist github gitlab])
       end
     end
   end
@@ -124,7 +175,7 @@ RSpec.describe Bundler::Dsl do
     it "handles syntax errors with a useful message" do
       expect(Bundler).to receive(:read_file).with(source_root.join("Gemfile").to_s).and_return("}")
       expect { subject.eval_gemfile("Gemfile") }.
-        to raise_error(Bundler::GemfileError, /There was an error parsing `Gemfile`: (syntax error, unexpected tSTRING_DEND|(compile error - )?syntax error, unexpected '\}'). Bundler cannot continue./)
+        to raise_error(Bundler::GemfileError, /There was an error parsing `Gemfile`: (syntax error, unexpected tSTRING_DEND|(compile error - )?syntax error, unexpected '\}'|.+?unexpected '}', ignoring it\n). Bundler cannot continue./m)
     end
 
     it "distinguishes syntax errors from evaluation errors" do
@@ -133,6 +184,17 @@ RSpec.describe Bundler::Dsl do
       )
       expect { subject.eval_gemfile("Gemfile") }.
         to raise_error(Bundler::GemfileError, /There was an error evaluating `Gemfile`: ruby_version must match the :engine_version for MRI/)
+    end
+
+    it "populates __dir__ and __FILE__ correctly" do
+      abs_path = source_root.join("../fragment.rb").to_s
+      expect(Bundler).to receive(:read_file).with(abs_path).and_return(<<~RUBY)
+        @fragment_dir = __dir__
+        @fragment_file = __FILE__
+      RUBY
+      subject.eval_gemfile("../fragment.rb")
+      expect(subject.instance_variable_get(:@fragment_dir)).to eq(source_root.dirname.to_s)
+      expect(subject.instance_variable_get(:@fragment_file)).to eq(abs_path)
     end
   end
 
@@ -260,7 +322,7 @@ RSpec.describe Bundler::Dsl do
     it "will raise a Bundler::GemfileError" do
       gemfile "gem 'foo', :path => /unquoted/string/syntax/error"
       expect { Bundler::Dsl.evaluate(bundled_app_gemfile, nil, true) }.
-        to raise_error(Bundler::GemfileError, /There was an error parsing `Gemfile`:( compile error -)? unknown regexp options - trg.+ Bundler cannot continue./)
+        to raise_error(Bundler::GemfileError, /There was an error parsing `Gemfile`:( compile error -)?.+?unknown regexp options - trg.+ Bundler cannot continue./m)
     end
   end
 
@@ -285,23 +347,6 @@ RSpec.describe Bundler::Dsl do
         end
 
         expect(subject.dependencies.last.source).to eq(other_source)
-      end
-    end
-  end
-
-  describe "#check_primary_source_safety" do
-    context "when a global source is not defined implicitly" do
-      it "will raise a major deprecation warning" do
-        not_a_global_source = double("not-a-global-source", no_remotes?: true)
-        allow(Bundler::Source::Rubygems).to receive(:new).and_return(not_a_global_source)
-
-        warning = "This Gemfile does not include an explicit global source. " \
-          "Not using an explicit global source may result in a different lockfile being generated depending on " \
-          "the gems you have installed locally before bundler is run. " \
-          "Instead, define a global source in your Gemfile like this: source \"https://rubygems.org\"."
-        expect(Bundler::SharedHelpers).to receive(:major_deprecation).with(2, warning)
-
-        subject.check_primary_source_safety
       end
     end
   end

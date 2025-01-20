@@ -48,6 +48,7 @@
 #include "ruby/thread_native.h"
 #include "ruby/ractor.h"
 #include "vm_sync.h"
+#include "builtin.h"
 
 /* Flags of RHash
  *
@@ -63,7 +64,7 @@
  *            The bounds of the AR table.
  * 13-19: RHASH_LEV_MASK
  *            The iterational level of the hash. Used to prevent modifications
- *            to the hash during interation.
+ *            to the hash during iteration.
  */
 
 #ifndef HASH_DEBUG
@@ -102,6 +103,7 @@ static VALUE rb_hash_s_try_convert(VALUE, VALUE);
  *  2. Insert WBs
  */
 
+/* :nodoc: */
 VALUE
 rb_hash_freeze(VALUE hash)
 {
@@ -109,6 +111,7 @@ rb_hash_freeze(VALUE hash)
 }
 
 VALUE rb_cHash;
+VALUE rb_cHash_empty_frozen;
 
 static VALUE envtbl;
 static ID id_hash, id_flatten_bang;
@@ -210,10 +213,26 @@ any_hash(VALUE a, st_index_t (*other_func)(VALUE))
     return (long)hnum;
 }
 
+VALUE rb_obj_hash(VALUE obj);
+VALUE rb_vm_call0(rb_execution_context_t *ec, VALUE recv, ID id, int argc, const VALUE *argv, const rb_callable_method_entry_t *cme, int kw_splat);
+
 static st_index_t
 obj_any_hash(VALUE obj)
 {
-    VALUE hval = rb_check_funcall_basic_kw(obj, id_hash, rb_mKernel, 0, 0, 0);
+    VALUE hval = Qundef;
+    VALUE klass = CLASS_OF(obj);
+    if (klass) {
+        const rb_callable_method_entry_t *cme = rb_callable_method_entry(klass, id_hash);
+        if (cme && METHOD_ENTRY_BASIC(cme)) {
+            // Optimize away the frame push overhead if it's the default Kernel#hash
+            if (cme->def->type == VM_METHOD_TYPE_CFUNC && cme->def->body.cfunc.func == (rb_cfunc_t)rb_obj_hash) {
+                hval = rb_obj_hash(obj);
+            }
+            else if (RBASIC_CLASS(cme->defined_class) == rb_mKernel) {
+                hval = rb_vm_call0(GET_EC(), obj, id_hash, 0, 0, cme, 0);
+            }
+        }
+    }
 
     if (UNDEF_P(hval)) {
         hval = rb_exec_recursive_outer_mid(hash_recursive, obj, 0, id_hash);
@@ -377,6 +396,9 @@ const struct st_hash_type rb_hashtype_ident = {
     rb_ident_cmp,
     rb_ident_hash,
 };
+
+#define RHASH_IDENTHASH_P(hash) (RHASH_TYPE(hash) == &identhash)
+#define RHASH_STRING_KEY_P(hash, key) (!RHASH_IDENTHASH_P(hash) && (rb_obj_class(key) == rb_cString))
 
 typedef st_index_t st_hash_t;
 
@@ -1376,13 +1398,6 @@ hash_iter_lev_dec(VALUE hash)
 }
 
 static VALUE
-hash_foreach_ensure_rollback(VALUE hash)
-{
-    hash_iter_lev_inc(hash);
-    return 0;
-}
-
-static VALUE
 hash_foreach_ensure(VALUE hash)
 {
     hash_iter_lev_dec(hash);
@@ -1600,7 +1615,7 @@ rb_hash_modify_check(VALUE hash)
     rb_check_frozen(hash);
 }
 
-RUBY_FUNC_EXPORTED struct st_table *
+struct st_table *
 rb_hash_tbl_raw(VALUE hash, const char *file, int line)
 {
     return ar_force_convert_table(hash, file, line);
@@ -1743,58 +1758,31 @@ set_proc_default(VALUE hash, VALUE proc)
     RHASH_SET_IFNONE(hash, proc);
 }
 
-/*
- *  call-seq:
- *     Hash.new(default_value = nil) -> new_hash
- *     Hash.new {|hash, key| ... } -> new_hash
- *
- *  Returns a new empty \Hash object.
- *
- *  The initial default value and initial default proc for the new hash
- *  depend on which form above was used. See {Default Values}[rdoc-ref:Hash@Default+Values].
- *
- *  If neither an argument nor a block given,
- *  initializes both the default value and the default proc to <tt>nil</tt>:
- *    h = Hash.new
- *    h.default # => nil
- *    h.default_proc # => nil
- *
- *  If argument <tt>default_value</tt> given but no block given,
- *  initializes the default value to the given <tt>default_value</tt>
- *  and the default proc to <tt>nil</tt>:
- *    h = Hash.new(false)
- *    h.default # => false
- *    h.default_proc # => nil
- *
- *  If a block given but no argument, stores the block as the default proc
- *  and sets the default value to <tt>nil</tt>:
- *    h = Hash.new {|hash, key| "Default value for #{key}" }
- *    h.default # => nil
- *    h.default_proc.class # => Proc
- *    h[:nosuch] # => "Default value for nosuch"
- */
-
 static VALUE
-rb_hash_initialize(int argc, VALUE *argv, VALUE hash)
+rb_hash_init(rb_execution_context_t *ec, VALUE hash, VALUE capa_value, VALUE ifnone_unset, VALUE ifnone, VALUE block)
 {
     rb_hash_modify(hash);
 
-    if (rb_block_given_p()) {
-        rb_check_arity(argc, 0, 0);
-        SET_PROC_DEFAULT(hash, rb_block_proc());
+    if (capa_value != INT2FIX(0)) {
+        long capa = NUM2LONG(capa_value);
+        if (capa > 0 && RHASH_SIZE(hash) == 0 && RHASH_AR_TABLE_P(hash)) {
+            hash_st_table_init(hash, &objhash, capa);
+        }
+    }
+
+    if (!NIL_P(block)) {
+        if (ifnone_unset != Qtrue) {
+            rb_check_arity(1, 0, 0);
+        }
+        else {
+            SET_PROC_DEFAULT(hash, block);
+        }
     }
     else {
-        rb_check_arity(argc, 0, 1);
-
-        VALUE options, ifnone;
-        rb_scan_args(argc, argv, "01:", &ifnone, &options);
-        if (NIL_P(ifnone) && !NIL_P(options)) {
-            ifnone = options;
-            rb_warn_deprecated_to_remove("3.4", "Calling Hash.new with keyword arguments", "Hash.new({ key: value })");
-        }
-        RHASH_SET_IFNONE(hash, ifnone);
+        RHASH_SET_IFNONE(hash, ifnone_unset == Qtrue ? Qnil : ifnone);
     }
 
+    hash_verify(hash);
     return hash;
 }
 
@@ -1810,29 +1798,31 @@ static VALUE rb_hash_to_a(VALUE hash);
  *  Returns a new \Hash object populated with the given objects, if any.
  *  See Hash::new.
  *
- *  With no argument, returns a new empty \Hash.
+ *  With no argument given, returns a new empty hash.
  *
- *  When the single given argument is a \Hash, returns a new \Hash
- *  populated with the entries from the given \Hash, excluding the
- *  default value or proc.
+ *  With a single argument given that is a hash,
+ *  returns a new hash initialized with the entries from +hash+
+ *  (but not with its +default+ or +default_proc+):
  *
  *    h = {foo: 0, bar: 1, baz: 2}
- *    Hash[h] # => {:foo=>0, :bar=>1, :baz=>2}
+ *    Hash[h] # => {foo: 0, bar: 1, baz: 2}
  *
- *  When the single given argument is an Array of 2-element Arrays,
- *  returns a new \Hash object wherein each 2-element array forms a
+ *  With a single argument given that is an array of 2-element arrays,
+ *  returns a new hash wherein each given 2-element array forms a
  *  key-value entry:
  *
- *    Hash[ [ [:foo, 0], [:bar, 1] ] ] # => {:foo=>0, :bar=>1}
+ *    Hash[ [ [:foo, 0], [:bar, 1] ] ] # => {foo: 0, bar: 1}
  *
- *  When the argument count is an even number;
- *  returns a new \Hash object wherein each successive pair of arguments
- *  has become a key-value entry:
+ *  With an even number of arguments given,
+ *  returns a new hash wherein each successive pair of arguments
+ *  is a key-value entry:
  *
- *    Hash[:foo, 0, :bar, 1] # => {:foo=>0, :bar=>1}
+ *    Hash[:foo, 0, :bar, 1] # => {foo: 0, bar: 1}
  *
- *  Raises an exception if the argument list does not conform to any
+ *  Raises ArgumentError if the argument list does not conform to any
  *  of the above.
+ *
+ *  See also {Methods for Creating a Hash}[rdoc-ref:Hash@Methods+for+Creating+a+Hash].
  */
 
 static VALUE
@@ -1914,14 +1904,14 @@ rb_check_hash_type(VALUE hash)
  *  call-seq:
  *    Hash.try_convert(obj) -> obj, new_hash, or nil
  *
- *  If +obj+ is a \Hash object, returns +obj+.
+ *  If +obj+ is a +Hash+ object, returns +obj+.
  *
  *  Otherwise if +obj+ responds to <tt>:to_hash</tt>,
  *  calls <tt>obj.to_hash</tt> and returns the result.
  *
  *  Returns +nil+ if +obj+ does not respond to <tt>:to_hash</tt>
  *
- *  Raises an exception unless <tt>obj.to_hash</tt> returns a \Hash object.
+ *  Raises an exception unless <tt>obj.to_hash</tt> returns a +Hash+ object.
  */
 static VALUE
 rb_hash_s_try_convert(VALUE dummy, VALUE hash)
@@ -2416,7 +2406,7 @@ rb_hash_delete(VALUE hash, VALUE key)
  *  If no block is given and +key+ is found, deletes the entry and returns the associated value:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h.delete(:bar) # => 1
- *    h # => {:foo=>0, :baz=>2}
+ *    h # => {foo: 0, baz: 2}
  *
  *  If no block given and +key+ is not found, returns +nil+.
  *
@@ -2424,13 +2414,13 @@ rb_hash_delete(VALUE hash, VALUE key)
  *  deletes the entry, and returns the associated value:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h.delete(:baz) { |key| raise 'Will never happen'} # => 2
- *    h # => {:foo=>0, :bar=>1}
+ *    h # => {foo: 0, bar: 1}
  *
  *  If a block is given and +key+ is not found,
  *  calls the block and returns the block's return value:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h.delete(:nosuch) { |key| "Key #{key} not found" } # => "Key nosuch not found"
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  */
 
 static VALUE
@@ -2479,7 +2469,7 @@ shift_i_safe(VALUE key, VALUE value, VALUE arg)
  *  returns a 2-element Array containing the removed key and value:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h.shift # => [:foo, 0]
- *    h # => {:bar=>1, :baz=>2}
+ *    h # => {bar: 1, baz: 2}
  *
  *  Returns nil if the hash is empty.
  */
@@ -2548,12 +2538,12 @@ hash_enum_size(VALUE hash, VALUE args, VALUE eobj)
  *  deletes each entry for which the block returns a truthy value;
  *  returns +self+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.delete_if {|key, value| value > 0 } # => {:foo=>0}
+ *    h.delete_if {|key, value| value > 0 } # => {foo: 0}
  *
  *  If no block given, returns a new Enumerator:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.delete_if # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:delete_if>
- *    e.each { |key, value| value > 0 } # => {:foo=>0}
+ *    e = h.delete_if # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:delete_if>
+ *    e.each { |key, value| value > 0 } # => {foo: 0}
  */
 
 VALUE
@@ -2576,14 +2566,14 @@ rb_hash_delete_if(VALUE hash)
  *  Returns +self+, whose remaining entries are those
  *  for which the block returns +false+ or +nil+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.reject! {|key, value| value < 2 } # => {:baz=>2}
+ *    h.reject! {|key, value| value < 2 } # => {baz: 2}
  *
  *  Returns +nil+ if no entries are removed.
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.reject! # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:reject!>
- *    e.each {|key, value| key.start_with?('b') } # => {:foo=>0}
+ *    e = h.reject! # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:reject!>
+ *    e.each {|key, value| key.start_with?('b') } # => {foo: 0}
  */
 
 static VALUE
@@ -2605,17 +2595,17 @@ rb_hash_reject_bang(VALUE hash)
  *    hash.reject {|key, value| ... } -> new_hash
  *    hash.reject -> new_enumerator
  *
- *  Returns a new \Hash object whose entries are all those
+ *  Returns a new +Hash+ object whose entries are all those
  *  from +self+ for which the block returns +false+ or +nil+:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = h.reject {|key, value| key.start_with?('b') }
- *    h1 # => {:foo=>0}
+ *    h1 # => {foo: 0}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.reject # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:reject>
+ *    e = h.reject # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:reject>
  *    h1 = e.each {|key, value| key.start_with?('b') }
- *    h1 # => {:foo=>0}
+ *    h1 # => {foo: 0}
  */
 
 static VALUE
@@ -2636,9 +2626,9 @@ rb_hash_reject(VALUE hash)
  *  call-seq:
  *    hash.slice(*keys) -> new_hash
  *
- *  Returns a new \Hash object containing the entries for the given +keys+:
+ *  Returns a new +Hash+ object containing the entries for the given +keys+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.slice(:baz, :foo) # => {:baz=>2, :foo=>0}
+ *    h.slice(:baz, :foo) # => {baz: 2, foo: 0}
  *
  *  Any given +keys+ that are not found are ignored.
  */
@@ -2668,9 +2658,9 @@ rb_hash_slice(int argc, VALUE *argv, VALUE hash)
  *  call-seq:
  *     hsh.except(*keys) -> a_hash
  *
- *  Returns a new \Hash excluding entries for the given +keys+:
+ *  Returns a new +Hash+ excluding entries for the given +keys+:
  *     h = { a: 100, b: 200, c: 300 }
- *     h.except(:a)          #=> {:b=>200, :c=>300}
+ *     h.except(:a)          #=> {b: 200, c: 300}
  *
  *  Any given +keys+ that are not found are ignored.
  */
@@ -2764,14 +2754,14 @@ keep_if_i(VALUE key, VALUE value, VALUE hash)
  *    hash.select {|key, value| ... } -> new_hash
  *    hash.select -> new_enumerator
  *
- *  Returns a new \Hash object whose entries are those for which the block returns a truthy value:
+ *  Returns a new +Hash+ object whose entries are those for which the block returns a truthy value:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.select {|key, value| value < 2 } # => {:foo=>0, :bar=>1}
+ *    h.select {|key, value| value < 2 } # => {foo: 0, bar: 1}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.select # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:select>
- *    e.each {|key, value| value < 2 } # => {:foo=>0, :bar=>1}
+ *    e = h.select # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:select>
+ *    e.each {|key, value| value < 2 } # => {foo: 0, bar: 1}
  */
 
 static VALUE
@@ -2795,14 +2785,14 @@ rb_hash_select(VALUE hash)
  *
  *  Returns +self+, whose entries are those for which the block returns a truthy value:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.select! {|key, value| value < 2 }  => {:foo=>0, :bar=>1}
+ *    h.select! {|key, value| value < 2 }  => {foo: 0, bar: 1}
  *
  *  Returns +nil+ if no entries were removed.
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.select!  # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:select!>
- *    e.each { |key, value| value < 2 } # => {:foo=>0, :bar=>1}
+ *    e = h.select!  # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:select!>
+ *    e.each { |key, value| value < 2 } # => {foo: 0, bar: 1}
  */
 
 static VALUE
@@ -2828,12 +2818,12 @@ rb_hash_select_bang(VALUE hash)
  *  retains the entry if the block returns a truthy value;
  *  otherwise deletes the entry; returns +self+.
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.keep_if { |key, value| key.start_with?('b') } # => {:bar=>1, :baz=>2}
+ *    h.keep_if { |key, value| key.start_with?('b') } # => {bar: 1, baz: 2}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.keep_if # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:keep_if>
- *    e.each { |key, value| key.start_with?('b') } # => {:bar=>1, :baz=>2}
+ *    e = h.keep_if # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:keep_if>
+ *    e.each { |key, value| key.start_with?('b') } # => {bar: 1, baz: 2}
  */
 
 static VALUE
@@ -2922,7 +2912,7 @@ NOINSERT_UPDATE_CALLBACK(hash_aset_str)
  *    h = {foo: 0, bar: 1}
  *    h[:foo] = 2 # => 2
  *    h.store(:bar, 3) # => 3
- *    h # => {:foo=>2, :bar=>3}
+ *    h # => {foo: 2, bar: 3}
  *
  *  If +key+ does not exist, adds the +key+ and +value+;
  *  the new entry is last in the order
@@ -2930,7 +2920,7 @@ NOINSERT_UPDATE_CALLBACK(hash_aset_str)
  *    h = {foo: 0, bar: 1}
  *    h[:baz] = 2 # => 2
  *    h.store(:bat, 3) # => 3
- *    h # => {:foo=>0, :bar=>1, :baz=>2, :bat=>3}
+ *    h # => {foo: 0, bar: 1, baz: 2, bat: 3}
  */
 
 VALUE
@@ -2940,7 +2930,7 @@ rb_hash_aset(VALUE hash, VALUE key, VALUE val)
 
     rb_hash_modify(hash);
 
-    if (RHASH_TYPE(hash) == &identhash || rb_obj_class(key) != rb_cString) {
+    if (!RHASH_STRING_KEY_P(hash, key)) {
         RHASH_UPDATE_ITER(hash, iter_p, key, hash_aset, val);
     }
     else {
@@ -2956,7 +2946,7 @@ rb_hash_aset(VALUE hash, VALUE key, VALUE val)
  *  Replaces the entire contents of +self+ with the contents of +other_hash+;
  *  returns +self+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.replace({bat: 3, bam: 4}) # => {:bat=>3, :bam=>4}
+ *    h.replace({bat: 3, bam: 4}) # => {bat: 3, bam: 4}
  */
 
 static VALUE
@@ -3015,7 +3005,7 @@ rb_hash_size_num(VALUE hash)
  *    {foo: 0, bar: 1, baz: 2}.empty? # => false
  */
 
-static VALUE
+VALUE
 rb_hash_empty_p(VALUE hash)
 {
     return RBOOL(RHASH_EMPTY_P(hash));
@@ -3035,7 +3025,7 @@ each_value_i(VALUE key, VALUE value, VALUE _)
  *
  *  Calls the given block with each value; returns +self+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.each_value {|value| puts value } # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h.each_value {|value| puts value } # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    0
  *    1
@@ -3043,9 +3033,9 @@ each_value_i(VALUE key, VALUE value, VALUE _)
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.each_value # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:each_value>
+ *    e = h.each_value # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:each_value>
  *    h1 = e.each {|value| puts value }
- *    h1 # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h1 # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    0
  *    1
@@ -3074,7 +3064,7 @@ each_key_i(VALUE key, VALUE value, VALUE _)
  *
  *  Calls the given block with each key; returns +self+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.each_key {|key| puts key }  # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h.each_key {|key| puts key }  # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    foo
  *    bar
@@ -3082,9 +3072,9 @@ each_key_i(VALUE key, VALUE value, VALUE _)
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.each_key # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:each_key>
+ *    e = h.each_key # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:each_key>
  *    h1 = e.each {|key| puts key }
- *    h1 # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h1 # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    foo
  *    bar
@@ -3124,7 +3114,7 @@ each_pair_i_fast(VALUE key, VALUE value, VALUE _)
  *
  *  Calls the given block with each key-value pair; returns +self+:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.each_pair {|key, value| puts "#{key}: #{value}"} # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h.each_pair {|key, value| puts "#{key}: #{value}"} # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    foo: 0
  *    bar: 1
@@ -3132,9 +3122,9 @@ each_pair_i_fast(VALUE key, VALUE value, VALUE _)
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.each_pair # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:each_pair>
+ *    e = h.each_pair # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:each_pair>
  *    h1 = e.each {|key, value| puts "#{key}: #{value}"}
- *    h1 # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h1 # => {foo: 0, bar: 1, baz: 2}
  *  Output:
  *    foo: 0
  *    bar: 1
@@ -3189,7 +3179,7 @@ transform_keys_i(VALUE key, VALUE value, VALUE result)
  *    hash.transform_keys(hash2) {|other_key| ...} -> new_hash
  *    hash.transform_keys -> new_enumerator
  *
- *  Returns a new \Hash object; each entry has:
+ *  Returns a new +Hash+ object; each entry has:
  *  * A key provided by the block.
  *  * The value from +self+.
  *
@@ -3206,16 +3196,16 @@ transform_keys_i(VALUE key, VALUE value, VALUE result)
  *      #=> {bar: 0, foo: 1, baz: 2}
  *
  *      h.transform_keys(foo: :hello, &:to_s)
- *      #=> {:hello=>0, "bar"=>1, "baz"=>2}
+ *      #=> {hello: 0, "bar" => 1, "baz" => 2}
  *
  *  Overwrites values for duplicate keys:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = h.transform_keys {|key| :bat }
- *    h1 # => {:bat=>2}
+ *    h1 # => {bat: 2}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.transform_keys # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:transform_keys>
+ *    e = h.transform_keys # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:transform_keys>
  *    h1 = e.each { |key| key.to_s }
  *    h1 # => {"foo"=>0, "bar"=>1, "baz"=>2}
  */
@@ -3329,20 +3319,20 @@ transform_values_foreach_replace(st_data_t *key, st_data_t *value, st_data_t arg
  *    hash.transform_values {|value| ... } -> new_hash
  *    hash.transform_values -> new_enumerator
  *
- *  Returns a new \Hash object; each entry has:
+ *  Returns a new +Hash+ object; each entry has:
  *  * A key from +self+.
  *  * A value provided by the block.
  *
  *  Transform values:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = h.transform_values {|value| value * 100}
- *    h1 # => {:foo=>0, :bar=>100, :baz=>200}
+ *    h1 # => {foo: 0, bar: 100, baz: 200}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.transform_values # => #<Enumerator: {:foo=>0, :bar=>1, :baz=>2}:transform_values>
+ *    e = h.transform_values # => #<Enumerator: {foo: 0, bar: 1, baz: 2}:transform_values>
  *    h1 = e.each { |value| value * 100}
- *    h1 # => {:foo=>0, :bar=>100, :baz=>200}
+ *    h1 # => {foo: 0, bar: 100, baz: 200}
  */
 static VALUE
 rb_hash_transform_values(VALUE hash)
@@ -3368,13 +3358,13 @@ rb_hash_transform_values(VALUE hash)
  *
  *  Returns +self+, whose keys are unchanged, and whose values are determined by the given block.
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.transform_values! {|value| value * 100} # => {:foo=>0, :bar=>100, :baz=>200}
+ *    h.transform_values! {|value| value * 100} # => {foo: 0, bar: 100, baz: 200}
  *
  *  Returns a new Enumerator if no block given:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    e = h.transform_values! # => #<Enumerator: {:foo=>0, :bar=>100, :baz=>200}:transform_values!>
+ *    e = h.transform_values! # => #<Enumerator: {foo: 0, bar: 100, baz: 200}:transform_values!>
  *    h1 = e.each {|value| value * 100}
- *    h1 # => {:foo=>0, :bar=>100, :baz=>200}
+ *    h1 # => {foo: 0, bar: 100, baz: 200}
  */
 static VALUE
 rb_hash_transform_values_bang(VALUE hash)
@@ -3417,20 +3407,65 @@ rb_hash_to_a(VALUE hash)
     return ary;
 }
 
+static bool
+symbol_key_needs_quote(VALUE str)
+{
+    long len = RSTRING_LEN(str);
+    if (len == 0 || !rb_str_symname_p(str)) return true;
+    const char *s = RSTRING_PTR(str);
+    char first = s[0];
+    if (first == '@' || first == '$' || first == '!') return true;
+    if (!at_char_boundary(s, s + len - 1, RSTRING_END(str), rb_enc_get(str))) return false;
+    switch (s[len - 1]) {
+        case '+':
+        case '-':
+        case '*':
+        case '/':
+        case '`':
+        case '%':
+        case '^':
+        case '&':
+        case '|':
+        case ']':
+        case '<':
+        case '=':
+        case '>':
+        case '~':
+        case '@':
+            return true;
+        default:
+            return false;
+    }
+}
+
 static int
 inspect_i(VALUE key, VALUE value, VALUE str)
 {
     VALUE str2;
 
-    str2 = rb_inspect(key);
+    bool is_symbol = SYMBOL_P(key);
+    bool quote = false;
+    if (is_symbol) {
+        str2 = rb_sym2str(key);
+        quote = symbol_key_needs_quote(str2);
+    }
+    else {
+        str2 = rb_inspect(key);
+    }
     if (RSTRING_LEN(str) > 1) {
         rb_str_buf_cat_ascii(str, ", ");
     }
     else {
         rb_enc_copy(str, str2);
     }
-    rb_str_buf_append(str, str2);
-    rb_str_buf_cat_ascii(str, "=>");
+    if (quote) {
+        rb_str_buf_append(str, rb_str_inspect(str2));
+    }
+    else {
+        rb_str_buf_append(str, str2);
+    }
+
+    rb_str_buf_cat_ascii(str, is_symbol ? ": " : " => ");
     str2 = rb_inspect(value);
     rb_str_buf_append(str, str2);
 
@@ -3457,7 +3492,7 @@ inspect_hash(VALUE hash, VALUE dummy, int recur)
  *  Returns a new String containing the hash entries:
 
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.inspect # => "{:foo=>0, :bar=>1, :baz=>2}"
+ *    h.inspect # => "{foo: 0, bar: 1, baz: 2}"
  *
  */
 
@@ -3519,12 +3554,12 @@ rb_hash_to_h_block(VALUE hash)
  *    hash.to_h -> self or new_hash
  *    hash.to_h {|key, value| ... } -> new_hash
  *
- *  For an instance of \Hash, returns +self+.
+ *  For an instance of +Hash+, returns +self+.
  *
- *  For a subclass of \Hash, returns a new \Hash
+ *  For a subclass of +Hash+, returns a new +Hash+
  *  containing the content of +self+.
  *
- *  When a block is given, returns a new \Hash object
+ *  When a block is given, returns a new +Hash+ object
  *  whose content is based on the block;
  *  the block should return a 2-element Array object
  *  specifying the key-value pair to be included in the returned Array:
@@ -3772,7 +3807,7 @@ hash_equal(VALUE hash1, VALUE hash2, int eql)
  *    hash == object -> true or false
  *
  *  Returns +true+ if all of the following are true:
- *  * +object+ is a \Hash object.
+ *  * +object+ is a +Hash+ object.
  *  * +hash+ and +object+ have the same keys (regardless of order).
  *  * For each key +key+, <tt>hash[key] == object[key]</tt>.
  *
@@ -3797,7 +3832,7 @@ rb_hash_equal(VALUE hash1, VALUE hash2)
  *    hash.eql?(object) -> true or false
  *
  *  Returns +true+ if all of the following are true:
- *  * +object+ is a \Hash object.
+ *  * +object+ is a +Hash+ object.
  *  * +hash+ and +object+ have the same keys (regardless of order).
  *  * For each key +key+, <tt>h[key].eql?(object[key])</tt>.
  *
@@ -3834,7 +3869,7 @@ hash_i(VALUE key, VALUE val, VALUE arg)
  *
  *  Returns the Integer hash-code for the hash.
  *
- *  Two \Hash objects have the same hash-code if their content is the same
+ *  Two +Hash+ objects have the same hash-code if their content is the same
  *  (regardless of order):
  *    h1 = {foo: 0, bar: 1, baz: 2}
  *    h2 = {baz: 2, bar: 1, foo: 0}
@@ -3866,7 +3901,7 @@ rb_hash_invert_i(VALUE key, VALUE value, VALUE hash)
  *  call-seq:
  *    hash.invert -> new_hash
  *
- *  Returns a new \Hash object with the each key-value pair inverted:
+ *  Returns a new +Hash+ object with the each key-value pair inverted:
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = h.invert
  *    h1 # => {0=>:foo, 1=>:bar, 2=>:baz}
@@ -3887,18 +3922,9 @@ rb_hash_invert(VALUE hash)
 }
 
 static int
-rb_hash_update_callback(st_data_t *key, st_data_t *value, struct update_arg *arg, int existing)
-{
-    *value = arg->arg;
-    return ST_CONTINUE;
-}
-
-NOINSERT_UPDATE_CALLBACK(rb_hash_update_callback)
-
-static int
 rb_hash_update_i(VALUE key, VALUE value, VALUE hash)
 {
-    RHASH_UPDATE(hash, key, rb_hash_update_callback, value);
+    rb_hash_aset(hash, key, value);
     return ST_CONTINUE;
 }
 
@@ -3909,6 +3935,9 @@ rb_hash_update_block_callback(st_data_t *key, st_data_t *value, struct update_ar
 
     if (existing) {
         newvalue = (st_data_t)rb_yield_values(3, (VALUE)*key, (VALUE)*value, (VALUE)newvalue);
+    }
+    else if (RHASH_STRING_KEY_P(arg->hash, *key) && !RB_OBJ_FROZEN(*key)) {
+        *key = rb_hash_key_str(*key);
     }
     *value = newvalue;
     return ST_CONTINUE;
@@ -3931,7 +3960,7 @@ rb_hash_update_block_i(VALUE key, VALUE value, VALUE hash)
  *
  *  Merges each of +other_hashes+ into +self+; returns +self+.
  *
- *  Each argument in +other_hashes+ must be a \Hash.
+ *  Each argument in +other_hashes+ must be a +Hash+.
  *
  *  With arguments and no block:
  *  * Returns +self+, after the given hashes are merged into it.
@@ -3943,7 +3972,7 @@ rb_hash_update_block_i(VALUE key, VALUE value, VALUE hash)
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = {bat: 3, bar: 4}
  *    h2 = {bam: 5, bat:6}
- *    h.merge!(h1, h2) # => {:foo=>0, :bar=>4, :baz=>2, :bat=>6, :bam=>5}
+ *    h.merge!(h1, h2) # => {foo: 0, bar: 4, baz: 2, bat: 6, bam: 5}
  *
  *  With arguments and a block:
  *  * Returns +self+, after the given hashes are merged.
@@ -3958,7 +3987,7 @@ rb_hash_update_block_i(VALUE key, VALUE value, VALUE hash)
  *    h1 = {bat: 3, bar: 4}
  *    h2 = {bam: 5, bat:6}
  *    h3 = h.merge!(h1, h2) { |key, old_value, new_value| old_value + new_value }
- *    h3 # => {:foo=>0, :bar=>5, :baz=>2, :bat=>9, :bam=>5}
+ *    h3 # => {foo: 0, bar: 5, baz: 2, bat: 9, bam: 5}
  *
  *  With no arguments:
  *  * Returns +self+, unmodified.
@@ -3966,9 +3995,9 @@ rb_hash_update_block_i(VALUE key, VALUE value, VALUE hash)
  *
  *  Example:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.merge # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h.merge # => {foo: 0, bar: 1, baz: 2}
  *    h1 = h.merge! { |key, old_value, new_value| raise 'Cannot happen' }
- *    h1 # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h1 # => {foo: 0, bar: 1, baz: 2}
  */
 
 static VALUE
@@ -4045,16 +4074,16 @@ rb_hash_update_by(VALUE hash1, VALUE hash2, rb_hash_update_func *func)
  *    hash.merge(*other_hashes) -> new_hash
  *    hash.merge(*other_hashes) { |key, old_value, new_value| ... } -> new_hash
  *
- *  Returns the new \Hash formed by merging each of +other_hashes+
+ *  Returns the new +Hash+ formed by merging each of +other_hashes+
  *  into a copy of +self+.
  *
- *  Each argument in +other_hashes+ must be a \Hash.
+ *  Each argument in +other_hashes+ must be a +Hash+.
  *
  *  ---
  *
  *  With arguments and no block:
- *  * Returns the new \Hash object formed by merging each successive
- *    \Hash in +other_hashes+ into +self+.
+ *  * Returns the new +Hash+ object formed by merging each successive
+ *    +Hash+ in +other_hashes+ into +self+.
  *  * Each new-key entry is added at the end.
  *  * Each duplicate-key entry's value overwrites the previous value.
  *
@@ -4062,10 +4091,10 @@ rb_hash_update_by(VALUE hash1, VALUE hash2, rb_hash_update_func *func)
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h1 = {bat: 3, bar: 4}
  *    h2 = {bam: 5, bat:6}
- *    h.merge(h1, h2) # => {:foo=>0, :bar=>4, :baz=>2, :bat=>6, :bam=>5}
+ *    h.merge(h1, h2) # => {foo: 0, bar: 4, baz: 2, bat: 6, bam: 5}
  *
  *  With arguments and a block:
- *  * Returns a new \Hash object that is the merge of +self+ and each given hash.
+ *  * Returns a new +Hash+ object that is the merge of +self+ and each given hash.
  *  * The given hashes are merged left to right.
  *  * Each new-key entry is added at the end.
  *  * For each duplicate key:
@@ -4077,7 +4106,7 @@ rb_hash_update_by(VALUE hash1, VALUE hash2, rb_hash_update_func *func)
  *    h1 = {bat: 3, bar: 4}
  *    h2 = {bam: 5, bat:6}
  *    h3 = h.merge(h1, h2) { |key, old_value, new_value| old_value + new_value }
- *    h3 # => {:foo=>0, :bar=>5, :baz=>2, :bat=>9, :bam=>5}
+ *    h3 # => {foo: 0, bar: 5, baz: 2, bat: 9, bam: 5}
  *
  *  With no arguments:
  *  * Returns a copy of +self+.
@@ -4085,9 +4114,9 @@ rb_hash_update_by(VALUE hash1, VALUE hash2, rb_hash_update_func *func)
  *
  *  Example:
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h.merge # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h.merge # => {foo: 0, bar: 1, baz: 2}
  *    h1 = h.merge { |key, old_value, new_value| raise 'Cannot happen' }
- *    h1 # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h1 # => {foo: 0, bar: 1, baz: 2}
  */
 
 static VALUE
@@ -4146,7 +4175,7 @@ rb_hash_assoc(VALUE hash, VALUE key)
 
     if (RHASH_EMPTY_P(hash)) return Qnil;
 
-    if (RHASH_ST_TABLE_P(hash) && RHASH_ST_TABLE(hash)->type != &identhash) {
+    if (RHASH_ST_TABLE_P(hash) && !RHASH_IDENTHASH_P(hash)) {
         VALUE value = Qundef;
         st_table assoctable = *RHASH_ST_TABLE(hash);
         assoctable.type = &(struct st_hash_type){
@@ -4303,7 +4332,7 @@ delete_if_nil(VALUE key, VALUE value, VALUE hash)
  *  Returns a copy of +self+ with all +nil+-valued entries removed:
  *    h = {foo: 0, bar: nil, baz: 2, bat: nil}
  *    h1 = h.compact
- *    h1 # => {:foo=>0, :baz=>2}
+ *    h1 # => {foo: 0, baz: 2}
  */
 
 static VALUE
@@ -4326,7 +4355,7 @@ rb_hash_compact(VALUE hash)
  *
  *  Returns +self+ with all its +nil+-valued entries removed (in place):
  *    h = {foo: 0, bar: nil, baz: 2, bat: nil}
- *    h.compact! # => {:foo=>0, :baz=>2}
+ *    h.compact! # => {foo: 0, baz: 2}
  *
  *  Returns +nil+ if no entries were removed.
  */
@@ -4423,7 +4452,7 @@ rb_hash_compare_by_id(VALUE hash)
 VALUE
 rb_hash_compare_by_id_p(VALUE hash)
 {
-    return RBOOL(RHASH_ST_TABLE_P(hash) && RHASH_ST_TABLE(hash)->type == &identhash);
+    return RBOOL(RHASH_IDENTHASH_P(hash));
 }
 
 VALUE
@@ -4555,8 +4584,8 @@ rb_hash_any_p(int argc, VALUE *argv, VALUE hash)
  *
  *  Nested Hashes:
  *    h = {foo: {bar: {baz: 2}}}
- *    h.dig(:foo) # => {:bar=>{:baz=>2}}
- *    h.dig(:foo, :bar) # => {:baz=>2}
+ *    h.dig(:foo) # => {bar: {baz: 2}}
+ *    h.dig(:foo, :bar) # => {baz: 2}
  *    h.dig(:foo, :bar, :baz) # => 2
  *    h.dig(:foo, :bar, :BAZ) # => nil
  *
@@ -5071,44 +5100,6 @@ envix(const char *nam)
 }
 #endif
 
-#if defined(_WIN32)
-static size_t
-getenvsize(const WCHAR* p)
-{
-    const WCHAR* porg = p;
-    while (*p++) p += lstrlenW(p) + 1;
-    return p - porg + 1;
-}
-
-static size_t
-getenvblocksize(void)
-{
-#ifdef _MAX_ENV
-    return _MAX_ENV;
-#else
-    return 32767;
-#endif
-}
-
-static int
-check_envsize(size_t n)
-{
-    if (_WIN32_WINNT < 0x0600 && rb_w32_osver() < 6) {
-        /* https://msdn.microsoft.com/en-us/library/windows/desktop/ms682653(v=vs.85).aspx */
-        /* Windows Server 2003 and Windows XP: The maximum size of the
-         * environment block for the process is 32,767 characters. */
-        WCHAR* p = GetEnvironmentStringsW();
-        if (!p) return -1; /* never happen */
-        n += getenvsize(p);
-        FreeEnvironmentStringsW(p);
-        if (n >= getenvblocksize()) {
-            return -1;
-        }
-    }
-    return 0;
-}
-#endif
-
 #if defined(_WIN32) || \
   (defined(__sun) && !(defined(HAVE_SETENV) && defined(HAVE_UNSETENV)))
 
@@ -5134,9 +5125,6 @@ void
 ruby_setenv(const char *name, const char *value)
 {
 #if defined(_WIN32)
-# if defined(MINGW_HAS_SECURE_API) || RUBY_MSVCRT_VERSION >= 80
-#   define HAVE__WPUTENV_S 1
-# endif
     VALUE buf;
     WCHAR *wname;
     WCHAR *wvalue = 0;
@@ -5147,34 +5135,23 @@ ruby_setenv(const char *name, const char *value)
     if (value) {
         int len2;
         len2 = MultiByteToWideChar(CP_UTF8, 0, value, -1, NULL, 0);
-        if (check_envsize((size_t)len + len2)) { /* len and len2 include '\0' */
-            goto fail;  /* 2 for '=' & '\0' */
-        }
         wname = ALLOCV_N(WCHAR, buf, len + len2);
         wvalue = wname + len;
         MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, len);
         MultiByteToWideChar(CP_UTF8, 0, value, -1, wvalue, len2);
-#ifndef HAVE__WPUTENV_S
-        wname[len-1] = L'=';
-#endif
     }
     else {
         wname = ALLOCV_N(WCHAR, buf, len + 1);
         MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, len);
         wvalue = wname + len;
         *wvalue = L'\0';
-#ifndef HAVE__WPUTENV_S
-        wname[len-1] = L'=';
-#endif
     }
 
     ENV_LOCK();
     {
-#ifndef HAVE__WPUTENV_S
-        failed = _wputenv(wname);
-#else
+        /* Use _wputenv_s() instead of SetEnvironmentVariableW() to make sure
+         * special variables like "TZ" are interpret by libc. */
         failed = _wputenv_s(wname, wvalue);
-#endif
     }
     ENV_UNLOCK();
 
@@ -5183,7 +5160,7 @@ ruby_setenv(const char *name, const char *value)
      * variable from the system area. */
     if (!value || !*value) {
         /* putenv() doesn't handle empty value */
-        if (!SetEnvironmentVariable(name, value) &&
+        if (!SetEnvironmentVariableW(wname, value ? wvalue : NULL) &&
             GetLastError() != ERROR_ENVVAR_NOT_FOUND) goto fail;
     }
     if (failed) {
@@ -5934,24 +5911,23 @@ env_to_s(VALUE _)
 static VALUE
 env_inspect(VALUE _)
 {
-    VALUE i;
     VALUE str = rb_str_buf_new2("{");
+    rb_encoding *enc = env_encoding();
 
     ENV_LOCK();
     {
         char **env = GET_ENVIRON(environ);
         while (*env) {
-            char *s = strchr(*env, '=');
+            const char *s = strchr(*env, '=');
 
             if (env != environ) {
                 rb_str_buf_cat2(str, ", ");
             }
             if (s) {
-                rb_str_buf_cat2(str, "\"");
-                rb_str_buf_cat(str, *env, s-*env);
-                rb_str_buf_cat2(str, "\"=>");
-                i = rb_inspect(rb_str_new2(s+1));
-                rb_str_buf_append(str, i);
+                rb_str_buf_append(str, rb_str_inspect(env_enc_str_new(*env, s-*env, enc)));
+                rb_str_buf_cat2(str, " => ");
+                s++;
+                rb_str_buf_append(str, rb_str_inspect(env_enc_str_new(s, strlen(s), enc)));
             }
             env++;
         }
@@ -6325,7 +6301,7 @@ env_f_to_hash(VALUE _)
  * Each name/value pair in ENV is yielded to the block.
  * The block must return a 2-element Array (name/value pair)
  * that is added to the return Hash as a key and value:
- *   ENV.to_h { |name, value| [name.to_sym, value.to_i] } # => {:bar=>1, :foo=>0}
+ *   ENV.to_h { |name, value| [name.to_sym, value.to_i] } # => {bar: 1, foo: 0}
  * Raises an exception if the block does not return an Array:
  *   ENV.to_h { |name, value| name } # Raises TypeError (wrong element type String (expected array))
  * Raises an exception if the block returns an Array of the wrong size:
@@ -6646,35 +6622,35 @@ static const rb_data_type_t env_data_type = {
 };
 
 /*
- *  A \Hash maps each of its unique keys to a specific value.
+ *  A +Hash+ maps each of its unique keys to a specific value.
  *
- *  A \Hash has certain similarities to an Array, but:
+ *  A +Hash+ has certain similarities to an Array, but:
  *  - An Array index is always an Integer.
- *  - A \Hash key can be (almost) any object.
+ *  - A +Hash+ key can be (almost) any object.
  *
- *  === \Hash \Data Syntax
+ *  === +Hash+ \Data Syntax
  *
- *  The older syntax for \Hash data uses the "hash rocket," <tt>=></tt>:
+ *  The older syntax for +Hash+ data uses the "hash rocket," <tt>=></tt>:
  *
  *    h = {:foo => 0, :bar => 1, :baz => 2}
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
- *  Alternatively, but only for a \Hash key that's a Symbol,
+ *  Alternatively, but only for a +Hash+ key that's a Symbol,
  *  you can use a newer JSON-style syntax,
  *  where each bareword becomes a Symbol:
  *
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
  *  You can also use a String in place of a bareword:
  *
  *    h = {'foo': 0, 'bar': 1, 'baz': 2}
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
  *  And you can mix the styles:
  *
  *    h = {foo: 0, :bar => 1, 'baz': 2}
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
  *  But it's an error to try the JSON-style syntax
  *  for a key that's not a bareword or a String:
@@ -6682,34 +6658,34 @@ static const rb_data_type_t env_data_type = {
  *    # Raises SyntaxError (syntax error, unexpected ':', expecting =>):
  *    h = {0: 'zero'}
  *
- *  Hash value can be omitted, meaning that value will be fetched from the context
+ *  +Hash+ value can be omitted, meaning that value will be fetched from the context
  *  by the name of the key:
  *
  *    x = 0
  *    y = 100
  *    h = {x:, y:}
- *    h # => {:x=>0, :y=>100}
+ *    h # => {x: 0, y: 100}
  *
  *  === Common Uses
  *
- *  You can use a \Hash to give names to objects:
+ *  You can use a +Hash+ to give names to objects:
  *
  *    person = {name: 'Matz', language: 'Ruby'}
- *    person # => {:name=>"Matz", :language=>"Ruby"}
+ *    person # => {name: "Matz", language: "Ruby"}
  *
- *  You can use a \Hash to give names to method arguments:
+ *  You can use a +Hash+ to give names to method arguments:
  *
  *    def some_method(hash)
  *      p hash
  *    end
- *    some_method({foo: 0, bar: 1, baz: 2}) # => {:foo=>0, :bar=>1, :baz=>2}
+ *    some_method({foo: 0, bar: 1, baz: 2}) # => {foo: 0, bar: 1, baz: 2}
  *
- *  Note: when the last argument in a method call is a \Hash,
+ *  Note: when the last argument in a method call is a +Hash+,
  *  the curly braces may be omitted:
  *
- *    some_method(foo: 0, bar: 1, baz: 2) # => {:foo=>0, :bar=>1, :baz=>2}
+ *    some_method(foo: 0, bar: 1, baz: 2) # => {foo: 0, bar: 1, baz: 2}
  *
- *  You can use a \Hash to initialize an object:
+ *  You can use a +Hash+ to initialize an object:
  *
  *    class Dev
  *      attr_accessor :name, :language
@@ -6721,111 +6697,111 @@ static const rb_data_type_t env_data_type = {
  *    matz = Dev.new(name: 'Matz', language: 'Ruby')
  *    matz # => #<Dev: @name="Matz", @language="Ruby">
  *
- *  === Creating a \Hash
+ *  === Creating a +Hash+
  *
- *  You can create a \Hash object explicitly with:
+ *  You can create a +Hash+ object explicitly with:
  *
  *  - A {hash literal}[rdoc-ref:syntax/literals.rdoc@Hash+Literals].
  *
  *  You can convert certain objects to Hashes with:
  *
- *  - \Method #Hash.
+ *  - Method #Hash.
  *
- *  You can create a \Hash by calling method Hash.new.
+ *  You can create a +Hash+ by calling method Hash.new.
  *
- *  Create an empty Hash:
+ *  Create an empty +Hash+:
  *
  *    h = Hash.new
  *    h # => {}
  *    h.class # => Hash
  *
- *  You can create a \Hash by calling method Hash.[].
+ *  You can create a +Hash+ by calling method Hash.[].
  *
- *  Create an empty Hash:
+ *  Create an empty +Hash+:
  *
  *    h = Hash[]
  *    h # => {}
  *
- *  Create a \Hash with initial entries:
+ *  Create a +Hash+ with initial entries:
  *
  *    h = Hash[foo: 0, bar: 1, baz: 2]
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
- *  You can create a \Hash by using its literal form (curly braces).
+ *  You can create a +Hash+ by using its literal form (curly braces).
  *
- *  Create an empty \Hash:
+ *  Create an empty +Hash+:
  *
  *    h = {}
  *    h # => {}
  *
- *  Create a \Hash with initial entries:
+ *  Create a +Hash+ with initial entries:
  *
  *    h = {foo: 0, bar: 1, baz: 2}
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
  *
- *  === \Hash Value Basics
+ *  === +Hash+ Value Basics
  *
- *  The simplest way to retrieve a \Hash value (instance method #[]):
+ *  The simplest way to retrieve a +Hash+ value (instance method #[]):
  *
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h[:foo] # => 0
  *
- *  The simplest way to create or update a \Hash value (instance method #[]=):
+ *  The simplest way to create or update a +Hash+ value (instance method #[]=):
  *
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h[:bat] = 3 # => 3
- *    h # => {:foo=>0, :bar=>1, :baz=>2, :bat=>3}
+ *    h # => {foo: 0, bar: 1, baz: 2, bat: 3}
  *    h[:foo] = 4 # => 4
- *    h # => {:foo=>4, :bar=>1, :baz=>2, :bat=>3}
+ *    h # => {foo: 4, bar: 1, baz: 2, bat: 3}
  *
- *  The simplest way to delete a \Hash entry (instance method #delete):
+ *  The simplest way to delete a +Hash+ entry (instance method #delete):
  *
  *    h = {foo: 0, bar: 1, baz: 2}
  *    h.delete(:bar) # => 1
- *    h # => {:foo=>0, :baz=>2}
+ *    h # => {foo: 0, baz: 2}
  *
  *  === Entry Order
  *
- *  A \Hash object presents its entries in the order of their creation. This is seen in:
+ *  A +Hash+ object presents its entries in the order of their creation. This is seen in:
  *
  *  - Iterative methods such as <tt>each</tt>, <tt>each_key</tt>, <tt>each_pair</tt>, <tt>each_value</tt>.
  *  - Other order-sensitive methods such as <tt>shift</tt>, <tt>keys</tt>, <tt>values</tt>.
  *  - The String returned by method <tt>inspect</tt>.
  *
- *  A new \Hash has its initial ordering per the given entries:
+ *  A new +Hash+ has its initial ordering per the given entries:
  *
  *    h = Hash[foo: 0, bar: 1]
- *    h # => {:foo=>0, :bar=>1}
+ *    h # => {foo: 0, bar: 1}
  *
  *  New entries are added at the end:
  *
  *    h[:baz] = 2
- *    h # => {:foo=>0, :bar=>1, :baz=>2}
+ *    h # => {foo: 0, bar: 1, baz: 2}
  *
  *  Updating a value does not affect the order:
  *
  *    h[:baz] = 3
- *    h # => {:foo=>0, :bar=>1, :baz=>3}
+ *    h # => {foo: 0, bar: 1, baz: 3}
  *
  *  But re-creating a deleted entry can affect the order:
  *
  *    h.delete(:foo)
  *    h[:foo] = 5
- *    h # => {:bar=>1, :baz=>3, :foo=>5}
+ *    h # => {bar: 1, baz: 3, foo: 5}
  *
- *  === \Hash Keys
+ *  === +Hash+ Keys
  *
- *  ==== \Hash Key Equivalence
+ *  ==== +Hash+ Key Equivalence
  *
  *  Two objects are treated as the same \hash key when their <code>hash</code> value
  *  is identical and the two objects are <code>eql?</code> to each other.
  *
- *  ==== Modifying an Active \Hash Key
+ *  ==== Modifying an Active +Hash+ Key
  *
- *  Modifying a \Hash key while it is in use damages the hash's index.
+ *  Modifying a +Hash+ key while it is in use damages the hash's index.
  *
- *  This \Hash has keys that are Arrays:
+ *  This +Hash+ has keys that are Arrays:
  *
  *    a0 = [ :foo, :bar ]
  *    a1 = [ :baz, :bat ]
@@ -6839,7 +6815,7 @@ static const rb_data_type_t env_data_type = {
  *    a0[0] = :bam
  *    a0.hash # => 1069447059
  *
- *  And damages the \Hash index:
+ *  And damages the +Hash+ index:
  *
  *    h.include?(a0) # => false
  *    h[a0] # => nil
@@ -6860,10 +6836,10 @@ static const rb_data_type_t env_data_type = {
  *    first_key = h.keys.first
  *    first_key.frozen? # => true
  *
- *  ==== User-Defined \Hash Keys
+ *  ==== User-Defined +Hash+ Keys
  *
- *  To be useable as a \Hash key, objects must implement the methods <code>hash</code> and <code>eql?</code>.
- *  Note: this requirement does not apply if the \Hash uses #compare_by_identity since comparison will then
+ *  To be usable as a +Hash+ key, objects must implement the methods <code>hash</code> and <code>eql?</code>.
+ *  Note: this requirement does not apply if the +Hash+ uses #compare_by_identity since comparison will then
  *  rely on the keys' object id instead of <code>hash</code> and <code>eql?</code>.
  *
  *  Object defines basic implementation for <code>hash</code> and <code>eq?</code> that makes each object
@@ -6951,7 +6927,7 @@ static const rb_data_type_t env_data_type = {
  *
  *  ==== Default Proc
  *
- *  When the default proc for a \Hash is set (i.e., not +nil+),
+ *  When the default proc for a +Hash+ is set (i.e., not +nil+),
  *  the default value returned by method #[] is determined by the default proc alone.
  *
  *  You can retrieve the default proc with method #default_proc:
@@ -6969,7 +6945,7 @@ static const rb_data_type_t env_data_type = {
  *
  *  When the default proc is set (i.e., not +nil+)
  *  and method #[] is called with with a non-existent key,
- *  #[] calls the default proc with both the \Hash object itself and the missing key,
+ *  #[] calls the default proc with both the +Hash+ object itself and the missing key,
  *  then returns the proc's return value:
  *
  *    h = Hash.new { |hash, key| "Default value for #{key}" }
@@ -6995,13 +6971,13 @@ static const rb_data_type_t env_data_type = {
  *
  *  === What's Here
  *
- *  First, what's elsewhere. \Class \Hash:
+ *  First, what's elsewhere. Class +Hash+:
  *
  *  - Inherits from {class Object}[rdoc-ref:Object@What-27s+Here].
  *  - Includes {module Enumerable}[rdoc-ref:Enumerable@What-27s+Here],
  *    which provides dozens of additional methods.
  *
- *  Here, class \Hash provides methods that are useful for:
+ *  Here, class +Hash+ provides methods that are useful for:
  *
  *  - {Creating a Hash}[rdoc-ref:Hash@Methods+for+Creating+a+Hash]
  *  - {Setting Hash State}[rdoc-ref:Hash@Methods+for+Setting+Hash+State]
@@ -7015,15 +6991,15 @@ static const rb_data_type_t env_data_type = {
  *  - {Transforming Keys and Values}[rdoc-ref:Hash@Methods+for+Transforming+Keys+and+Values]
  *  - {And more....}[rdoc-ref:Hash@Other+Methods]
  *
- *  \Class \Hash also includes methods from module Enumerable.
+ *  Class +Hash+ also includes methods from module Enumerable.
  *
- *  ==== Methods for Creating a \Hash
+ *  ==== Methods for Creating a +Hash+
  *
  *  - ::[]: Returns a new hash populated with given objects.
  *  - ::new: Returns a new empty hash.
  *  - ::try_convert: Returns a new hash created from a given object.
  *
- *  ==== Methods for Setting \Hash State
+ *  ==== Methods for Setting +Hash+ State
  *
  *  - #compare_by_identity: Sets +self+ to consider only identity in comparing keys.
  *  - #default=: Sets the default to a given value.
@@ -7039,10 +7015,9 @@ static const rb_data_type_t env_data_type = {
  *  - #empty?: Returns whether there are no entries.
  *  - #eql?: Returns whether a given object is equal to +self+.
  *  - #hash: Returns the integer hash code.
- *  - #has_value?: Returns whether a given object is a value in +self+.
- *  - #include?, #has_key?, #member?, #key?: Returns whether a given object is a key in +self+.
- *  - #length, #size: Returns the count of entries.
- *  - #value?: Returns whether a given object is a value in +self+.
+ *  - #has_value? (aliased as #value?): Returns whether a given object is a value in +self+.
+ *  - #include? (aliased as #has_key?, #member?, #key?): Returns whether a given object is a key in +self+.
+ *  - #size (aliased as #length): Returns the count of entries.
  *
  *  ==== Methods for Comparing
  *
@@ -7069,10 +7044,10 @@ static const rb_data_type_t env_data_type = {
  *
  *  ==== Methods for Assigning
  *
- *  - #[]=, #store: Associates a given key with a given value.
+ *  - #[]= (aliased as #store): Associates a given key with a given value.
  *  - #merge: Returns the hash formed by merging each given hash into a copy of +self+.
- *  - #merge!, #update: Merges each given hash into +self+.
- *  - #replace: Replaces the entire contents of +self+ with the contents of a given hash.
+ *  - #update (aliased as #merge!): Merges each given hash into +self+.
+ *  - #replace (aliased as #initialize_copy): Replaces the entire contents of +self+ with the contents of a given hash.
  *
  *  ==== Methods for Deleting
  *
@@ -7082,7 +7057,7 @@ static const rb_data_type_t env_data_type = {
  *  - #compact!: Removes all +nil+-valued entries from +self+.
  *  - #delete: Removes the entry for a given key.
  *  - #delete_if: Removes entries selected by a given block.
- *  - #filter!, #select!: Keep only those entries selected by a given block.
+ *  - #select! (aliased as #filter!): Keep only those entries selected by a given block.
  *  - #keep_if: Keep only those entries selected by a given block.
  *  - #reject!: Removes entries selected by a given block.
  *  - #shift: Removes and returns the first entry.
@@ -7091,22 +7066,22 @@ static const rb_data_type_t env_data_type = {
  *
  *  - #compact: Returns a copy of +self+ with all +nil+-valued entries removed.
  *  - #except: Returns a copy of +self+ with entries removed for specified keys.
- *  - #filter, #select: Returns a copy of +self+ with only those entries selected by a given block.
+ *  - #select (aliased as #filter): Returns a copy of +self+ with only those entries selected by a given block.
  *  - #reject: Returns a copy of +self+ with entries removed as specified by a given block.
  *  - #slice: Returns a hash containing the entries for given keys.
  *
  *  ==== Methods for Iterating
- *  - #each, #each_pair: Calls a given block with each key-value pair.
+ *  - #each_pair (aliased as #each): Calls a given block with each key-value pair.
  *  - #each_key: Calls a given block with each key.
  *  - #each_value: Calls a given block with each value.
  *
  *  ==== Methods for Converting
  *
- *  - #inspect, #to_s: Returns a new String containing the hash entries.
+ *  - #inspect (aliased as #to_s): Returns a new String containing the hash entries.
  *  - #to_a: Returns a new array of 2-element arrays;
  *    each nested array contains a key-value pair from +self+.
- *  - #to_h: Returns +self+ if a \Hash;
- *    if a subclass of \Hash, returns a \Hash containing the entries from +self+.
+ *  - #to_h: Returns +self+ if a +Hash+;
+ *    if a subclass of +Hash+, returns a +Hash+ containing the entries from +self+.
  *  - #to_hash: Returns +self+.
  *  - #to_proc: Returns a proc that maps a given key to its value.
  *
@@ -7137,9 +7112,9 @@ Init_Hash(void)
     rb_define_alloc_func(rb_cHash, empty_hash_alloc);
     rb_define_singleton_method(rb_cHash, "[]", rb_hash_s_create, -1);
     rb_define_singleton_method(rb_cHash, "try_convert", rb_hash_s_try_convert, 1);
-    rb_define_method(rb_cHash, "initialize", rb_hash_initialize, -1);
     rb_define_method(rb_cHash, "initialize_copy", rb_hash_replace, 1);
     rb_define_method(rb_cHash, "rehash", rb_hash_rehash, 0);
+    rb_define_method(rb_cHash, "freeze", rb_hash_freeze, 0);
 
     rb_define_method(rb_cHash, "to_hash", rb_hash_to_hash, 0);
     rb_define_method(rb_cHash, "to_h", rb_hash_to_h, 0);
@@ -7226,17 +7201,20 @@ Init_Hash(void)
     rb_define_singleton_method(rb_cHash, "ruby2_keywords_hash?", rb_hash_s_ruby2_keywords_hash_p, 1);
     rb_define_singleton_method(rb_cHash, "ruby2_keywords_hash", rb_hash_s_ruby2_keywords_hash, 1);
 
+    rb_cHash_empty_frozen = rb_hash_freeze(rb_hash_new());
+    rb_vm_register_global_object(rb_cHash_empty_frozen);
+
     /* Document-class: ENV
      *
-     * \ENV is a hash-like accessor for environment variables.
+     * +ENV+ is a hash-like accessor for environment variables.
      *
      * === Interaction with the Operating System
      *
-     * The \ENV object interacts with the operating system's environment variables:
+     * The +ENV+ object interacts with the operating system's environment variables:
      *
-     * - When you get the value for a name in \ENV, the value is retrieved from among the current environment variables.
-     * - When you create or set a name-value pair in \ENV, the name and value are immediately set in the environment variables.
-     * - When you delete a name-value pair in \ENV, it is immediately deleted from the environment variables.
+     * - When you get the value for a name in +ENV+, the value is retrieved from among the current environment variables.
+     * - When you create or set a name-value pair in +ENV+, the name and value are immediately set in the environment variables.
+     * - When you delete a name-value pair in +ENV+, it is immediately deleted from the environment variables.
      *
      * === Names and Values
      *
@@ -7286,33 +7264,33 @@ Init_Hash(void)
      *
      * === About Ordering
      *
-     * \ENV enumerates its name/value pairs in the order found
+     * +ENV+ enumerates its name/value pairs in the order found
      * in the operating system's environment variables.
-     * Therefore the ordering of \ENV content is OS-dependent, and may be indeterminate.
+     * Therefore the ordering of +ENV+ content is OS-dependent, and may be indeterminate.
      *
      * This will be seen in:
-     * - A Hash returned by an \ENV method.
-     * - An Enumerator returned by an \ENV method.
+     * - A Hash returned by an +ENV+ method.
+     * - An Enumerator returned by an +ENV+ method.
      * - An Array returned by ENV.keys, ENV.values, or ENV.to_a.
      * - The String returned by ENV.inspect.
      * - The Array returned by ENV.shift.
      * - The name returned by ENV.key.
      *
      * === About the Examples
-     * Some methods in \ENV return \ENV itself. Typically, there are many environment variables.
-     * It's not useful to display a large \ENV in the examples here,
-     * so most example snippets begin by resetting the contents of \ENV:
-     * - ENV.replace replaces \ENV with a new collection of entries.
-     * - ENV.clear empties \ENV.
+     * Some methods in +ENV+ return +ENV+ itself. Typically, there are many environment variables.
+     * It's not useful to display a large +ENV+ in the examples here,
+     * so most example snippets begin by resetting the contents of +ENV+:
+     * - ENV.replace replaces +ENV+ with a new collection of entries.
+     * - ENV.clear empties +ENV+.
      *
      * === What's Here
      *
-     * First, what's elsewhere. \Class \ENV:
+     * First, what's elsewhere. Class +ENV+:
      *
      * - Inherits from {class Object}[rdoc-ref:Object@What-27s+Here].
      * - Extends {module Enumerable}[rdoc-ref:Enumerable@What-27s+Here],
      *
-     * Here, class \ENV provides methods that are useful for:
+     * Here, class +ENV+ provides methods that are useful for:
      *
      * - {Querying}[rdoc-ref:ENV@Methods+for+Querying]
      * - {Assigning}[rdoc-ref:ENV@Methods+for+Assigning]
@@ -7324,10 +7302,10 @@ Init_Hash(void)
      * ==== Methods for Querying
      *
      * - ::[]: Returns the value for the given environment variable name if it exists:
-     * - ::empty?: Returns whether \ENV is empty.
-     * - ::has_value?, ::value?: Returns whether the given value is in \ENV.
+     * - ::empty?: Returns whether +ENV+ is empty.
+     * - ::has_value?, ::value?: Returns whether the given value is in +ENV+.
      * - ::include?, ::has_key?, ::key?, ::member?: Returns whether the given name
-         is in \ENV.
+         is in +ENV+.
      * - ::key: Returns the name of the first entry with the given value.
      * - ::size, ::length: Returns the number of entries.
      * - ::value?: Returns whether any entry has the given value.
@@ -7335,9 +7313,9 @@ Init_Hash(void)
      * ==== Methods for Assigning
      *
      * - ::[]=, ::store: Creates, updates, or deletes the named environment variable.
-     * - ::clear: Removes every environment variable; returns \ENV:
-     * - ::update, ::merge!: Adds to \ENV each key/value pair in the given hash.
-     * - ::replace: Replaces the entire content of the \ENV
+     * - ::clear: Removes every environment variable; returns +ENV+:
+     * - ::update, ::merge!: Adds to +ENV+ each key/value pair in the given hash.
+     * - ::replace: Replaces the entire content of the +ENV+
      *   with the name/value pairs in the given hash.
      *
      * ==== Methods for Deleting
@@ -7359,12 +7337,12 @@ Init_Hash(void)
      *
      * - ::assoc: Returns a 2-element array containing the name and value
      *   of the named environment variable if it exists:
-     * - ::clone: Returns \ENV (and issues a warning).
+     * - ::clone: Returns +ENV+ (and issues a warning).
      * - ::except: Returns a hash of all name/value pairs except those given.
      * - ::fetch: Returns the value for the given name.
-     * - ::inspect: Returns the contents of \ENV as a string.
-     * - ::invert: Returns a hash whose keys are the \ENV values,
-         and whose values are the corresponding \ENV names.
+     * - ::inspect: Returns the contents of +ENV+ as a string.
+     * - ::invert: Returns a hash whose keys are the +ENV+ values,
+         and whose values are the corresponding +ENV+ names.
      * - ::keys: Returns an array of all names.
      * - ::rassoc: Returns the name and value of the first found entry
      *   that has the given value.
@@ -7382,7 +7360,7 @@ Init_Hash(void)
      *
      * - ::dup: Raises an exception.
      * - ::freeze: Raises an exception.
-     * - ::rehash: Returns +nil+, without modifying \ENV.
+     * - ::rehash: Returns +nil+, without modifying +ENV+.
      *
      */
 
@@ -7453,14 +7431,13 @@ Init_Hash(void)
     rb_undef_method(envtbl_class, "initialize_dup");
 
     /*
-     * \ENV is a Hash-like accessor for environment variables.
+     * +ENV+ is a Hash-like accessor for environment variables.
      *
      * See ENV (the class) for more details.
      */
     rb_define_global_const("ENV", envtbl);
 
-    /* for callcc */
-    ruby_register_rollback_func_for_ensure(hash_foreach_ensure, hash_foreach_ensure_rollback);
-
     HASH_ASSERT(sizeof(ar_hint_t) * RHASH_AR_TABLE_MAX_SIZE == sizeof(VALUE));
 }
+
+#include "hash.rbinc"

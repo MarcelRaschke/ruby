@@ -8,19 +8,12 @@
 
 = Licence
   This program is licensed under the same licence as Ruby.
-  (See the file 'LICENCE'.)
+  (See the file 'COPYING'.)
 =end
 
 require "mkmf"
 
-ssl_dirs = nil
-if defined?(::TruffleRuby)
-  # Always respect the openssl prefix chosen by truffle/openssl-prefix
-  require 'truffle/openssl-prefix'
-  ssl_dirs = dir_config("openssl", ENV["OPENSSL_PREFIX"])
-else
-  ssl_dirs = dir_config("openssl")
-end
+ssl_dirs = dir_config("openssl")
 dir_config_given = ssl_dirs.any?
 
 _, ssl_ldir = ssl_dirs
@@ -127,14 +120,15 @@ end
 
 version_ok = if have_macro("LIBRESSL_VERSION_NUMBER", "openssl/opensslv.h")
   is_libressl = true
-  checking_for("LibreSSL version >= 3.1.0") {
-    try_static_assert("LIBRESSL_VERSION_NUMBER >= 0x30100000L", "openssl/opensslv.h") }
+  checking_for("LibreSSL version >= 3.9.0") {
+    try_static_assert("LIBRESSL_VERSION_NUMBER >= 0x30900000L", "openssl/opensslv.h") }
 else
+  is_openssl = true
   checking_for("OpenSSL version >= 1.0.2") {
     try_static_assert("OPENSSL_VERSION_NUMBER >= 0x10002000L", "openssl/opensslv.h") }
 end
 unless version_ok
-  raise "OpenSSL >= 1.0.2 or LibreSSL >= 3.1.0 is required"
+  raise "OpenSSL >= 1.0.2 or LibreSSL >= 3.9.0 is required"
 end
 
 # Prevent wincrypt.h from being included, which defines conflicting macro with openssl/x509.h
@@ -150,11 +144,13 @@ ssl_h = "openssl/ssl.h".freeze
 
 # compile options
 have_func("RAND_egd()", "openssl/rand.h")
-engines = %w{dynamic 4758cca aep atalla chil
-             cswift nuron sureware ubsec padlock capi gmp gost cryptodev}
-engines.each { |name|
-  have_func("ENGINE_load_#{name}()", "openssl/engine.h")
-}
+if is_openssl
+  engines = %w{dynamic 4758cca aep atalla chil
+               cswift nuron sureware ubsec padlock capi gmp gost cryptodev}
+  engines.each { |name|
+    have_func("ENGINE_load_#{name}()", "openssl/engine.h")
+  }
+end
 
 # added in 1.1.0
 if !have_struct_member("SSL", "ctx", "openssl/ssl.h") || is_libressl
@@ -194,6 +190,7 @@ have_func("TS_VERIFY_CTX_add_flags(NULL, 0)", ts_h)
 have_func("TS_RESP_CTX_set_time_cb(NULL, NULL, NULL)", ts_h)
 have_func("EVP_PBE_scrypt(\"\", 0, (unsigned char *)\"\", 0, 0, 0, 0, 0, NULL, 0)", evp_h)
 have_func("SSL_CTX_set_post_handshake_auth(NULL, 0)", ssl_h)
+have_func("X509_STORE_get0_param(NULL)", x509_h)
 
 # added in 1.1.1
 have_func("EVP_PKEY_check(NULL)", evp_h)

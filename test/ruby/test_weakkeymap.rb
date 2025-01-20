@@ -61,6 +61,20 @@ class TestWeakKeyMap < Test::Unit::TestCase
     refute @wm[k]
   end
 
+  def test_clear_bug_20691
+    assert_normal_exit(<<~RUBY)
+      map = ObjectSpace::WeakKeyMap.new
+
+      1_000.times do
+        1_000.times do
+          map[Object.new] = nil
+        end
+
+        map.clear
+      end
+    RUBY
+  end
+
   def test_inspect
     x = Object.new
     k = Object.new
@@ -124,6 +138,7 @@ class TestWeakKeyMap < Test::Unit::TestCase
   end
 
   def test_gc_compact_stress
+    omit "compaction doesn't work well on s390x" if RUBY_PLATFORM =~ /s390x/ # https://github.com/ruby/ruby/pull/5077
     EnvUtil.under_gc_compact_stress { ObjectSpace::WeakKeyMap.new }
   end
 

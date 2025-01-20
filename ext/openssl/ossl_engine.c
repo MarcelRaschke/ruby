@@ -5,7 +5,7 @@
  */
 /*
  * This program is licensed under the same licence as Ruby.
- * (See the file 'LICENCE'.)
+ * (See the file 'COPYING'.)
  */
 #include "ossl.h"
 
@@ -37,17 +37,17 @@
  *
  * See also, https://www.openssl.org/docs/crypto/engine.html
  */
-VALUE cEngine;
+static VALUE cEngine;
 /* Document-class: OpenSSL::Engine::EngineError
  *
  * This is the generic exception for OpenSSL::Engine related errors
  */
-VALUE eEngineError;
+static VALUE eEngineError;
 
 /*
  * Private
  */
-#if !defined(LIBRESSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x10100000
+#if OSSL_OPENSSL_PREREQ(1, 1, 0)
 #define OSSL_ENGINE_LOAD_IF_MATCH(engine_name, x) \
 do{\
   if(!strcmp(#engine_name, RSTRING_PTR(name))){\
@@ -163,7 +163,7 @@ ossl_engine_s_load(int argc, VALUE *argv, VALUE klass)
 static VALUE
 ossl_engine_s_cleanup(VALUE self)
 {
-#if defined(LIBRESSL_VERSION_NUMBER) || OPENSSL_VERSION_NUMBER < 0x10100000
+#if !OSSL_OPENSSL_PREREQ(1, 1, 0)
     ENGINE_cleanup();
 #endif
     return Qnil;

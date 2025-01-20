@@ -489,7 +489,7 @@ class TestGemDependencyInstaller < Gem::TestCase
 
     # compact index is available
     compact_index_response = Gem::Net::HTTPResponse.new "1.1", 200, "OK"
-    compact_index_response.uri = URI("http://gems.example.com")
+    compact_index_response.uri = Gem::URI("http://gems.example.com")
     @fetcher.data["http://gems.example.com/"] = compact_index_response
 
     # but private local gem not present there
@@ -817,6 +817,48 @@ class TestGemDependencyInstaller < Gem::TestCase
 
     assert_equal %w[a-1], Gem::Specification.map(&:full_name)
     assert_equal %w[a-1], inst.installed_gems.map(&:full_name)
+  end
+
+  def test_install_dual_repository_and_done_installing_hooks
+    util_setup_gems
+
+    FileUtils.mv @a1_gem, @tempdir
+    FileUtils.mv @b1_gem, @tempdir
+    inst = nil
+
+    # Make sure gem is installed to standard GEM_HOME
+
+    Dir.chdir @tempdir do
+      inst = Gem::DependencyInstaller.new install_dir: @gemhome
+      inst.install "b"
+    end
+
+    # and also to an additional GEM_PATH
+
+    gemhome2 = "#{@gemhome}2"
+
+    Dir.chdir @tempdir do
+      inst = Gem::DependencyInstaller.new install_dir: gemhome2
+      inst.install "b"
+    end
+
+    # Now install the local gem with the additional GEM_PATH
+
+    ENV["GEM_HOME"] = @gemhome
+    ENV["GEM_PATH"] = [@gemhome, gemhome2].join File::PATH_SEPARATOR
+    Gem.clear_paths
+
+    Gem.done_installing do |installer, specs|
+      refute_nil installer
+      assert_equal [@b1], specs
+    end
+
+    Dir.chdir @tempdir do
+      inst = Gem::DependencyInstaller.new
+      inst.install "b-1.gem"
+    end
+
+    assert_equal %w[b-1], inst.installed_gems.map(&:full_name)
   end
 
   def test_install_remote

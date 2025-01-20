@@ -5,40 +5,37 @@ require "bundler/definition"
 RSpec.describe Bundler::Definition do
   describe "#lock" do
     before do
-      allow(Bundler).to receive(:settings) { Bundler::Settings.new(".") }
-      allow(Bundler::SharedHelpers).to receive(:find_gemfile) { Pathname.new("Gemfile") }
+      allow(Bundler::SharedHelpers).to receive(:find_gemfile) { bundled_app_gemfile }
       allow(Bundler).to receive(:ui) { double("UI", info: "", debug: "") }
     end
-    context "when it's not possible to write to the file" do
-      subject { Bundler::Definition.new(nil, [], Bundler::SourceList.new, []) }
 
+    subject { Bundler::Definition.new(bundled_app_lock, [], Bundler::SourceList.new, {}) }
+
+    context "when it's not possible to write to the file" do
       it "raises an PermissionError with explanation" do
         allow(File).to receive(:open).and_call_original
-        expect(File).to receive(:open).with("Gemfile.lock", "wb").
-          and_raise(Errno::EACCES)
-        expect { subject.lock("Gemfile.lock") }.
+        expect(File).to receive(:open).with(bundled_app_lock, "wb").
+          and_raise(Errno::EACCES.new(bundled_app_lock.to_s))
+        expect { subject.lock }.
           to raise_error(Bundler::PermissionError, /Gemfile\.lock/)
       end
     end
     context "when a temporary resource access issue occurs" do
-      subject { Bundler::Definition.new(nil, [], Bundler::SourceList.new, []) }
-
       it "raises a TemporaryResourceError with explanation" do
         allow(File).to receive(:open).and_call_original
-        expect(File).to receive(:open).with("Gemfile.lock", "wb").
+        expect(File).to receive(:open).with(bundled_app_lock, "wb").
           and_raise(Errno::EAGAIN)
-        expect { subject.lock("Gemfile.lock") }.
+        expect { subject.lock }.
           to raise_error(Bundler::TemporaryResourceError, /temporarily unavailable/)
       end
     end
     context "when Bundler::Definition.no_lock is set to true" do
-      subject { Bundler::Definition.new(nil, [], Bundler::SourceList.new, []) }
       before { Bundler::Definition.no_lock = true }
       after { Bundler::Definition.no_lock = false }
 
       it "does not create a lock file" do
-        subject.lock("Gemfile.lock")
-        expect(File.file?("Gemfile.lock")).to eq false
+        subject.lock
+        expect(bundled_app_lock).not_to be_file
       end
     end
   end
@@ -48,17 +45,17 @@ RSpec.describe Bundler::Definition do
       build_lib "foo", "1.0", path: lib_path("foo")
 
       install_gemfile <<-G
-        source "#{file_uri_for(gem_repo1)}"
+        source "https://gem.repo1"
         gem "foo", :path => "#{lib_path("foo")}"
       G
 
       build_lib "foo", "1.0", path: lib_path("foo") do |s|
-        s.add_dependency "rack", "1.0"
+        s.add_dependency "myrack", "1.0"
       end
 
-      checksums = checksums_section_when_existing do |c|
+      checksums = checksums_section_when_enabled do |c|
         c.no_checksum "foo", "1.0"
-        c.checksum gem_repo1, "rack", "1.0.0"
+        c.checksum gem_repo1, "myrack", "1.0.0"
       end
 
       bundle :install, env: { "DEBUG" => "1" }
@@ -69,12 +66,12 @@ RSpec.describe Bundler::Definition do
           remote: #{lib_path("foo")}
           specs:
             foo (1.0)
-              rack (= 1.0)
+              myrack (= 1.0)
 
         GEM
-          remote: #{file_uri_for(gem_repo1)}/
+          remote: https://gem.repo1/
           specs:
-            rack (1.0.0)
+            myrack (1.0.0)
 
         PLATFORMS
           #{lockfile_platforms}
@@ -94,7 +91,7 @@ RSpec.describe Bundler::Definition do
       end
 
       gemfile <<-G
-        source "#{file_uri_for(gem_repo4)}"
+        source "https://gem.repo4"
         gem "ffi"
       G
 
@@ -107,17 +104,17 @@ RSpec.describe Bundler::Definition do
 
     it "for a path gem with deps and no changes" do
       build_lib "foo", "1.0", path: lib_path("foo") do |s|
-        s.add_dependency "rack", "1.0"
+        s.add_dependency "myrack", "1.0"
         s.add_development_dependency "net-ssh", "1.0"
       end
 
-      checksums = checksums_section_when_existing do |c|
+      checksums = checksums_section_when_enabled do |c|
         c.no_checksum "foo", "1.0"
-        c.checksum gem_repo1, "rack", "1.0.0"
+        c.checksum gem_repo1, "myrack", "1.0.0"
       end
 
       install_gemfile <<-G
-        source "#{file_uri_for(gem_repo1)}"
+        source "https://gem.repo1"
         gem "foo", :path => "#{lib_path("foo")}"
       G
 
@@ -126,12 +123,12 @@ RSpec.describe Bundler::Definition do
           remote: #{lib_path("foo")}
           specs:
             foo (1.0)
-              rack (= 1.0)
+              myrack (= 1.0)
 
         GEM
-          remote: #{file_uri_for(gem_repo1)}/
+          remote: https://gem.repo1/
           specs:
-            rack (1.0.0)
+            myrack (1.0.0)
 
         PLATFORMS
           #{lockfile_platforms}
@@ -152,14 +149,14 @@ RSpec.describe Bundler::Definition do
     end
 
     it "for a locked gem for another platform" do
-      checksums = checksums_section_when_existing do |c|
-        c.no_checksum "only_java", "1.1", "java"
-      end
-
       install_gemfile <<-G
-        source "#{file_uri_for(gem_repo1)}"
+        source "https://gem.repo1"
         gem "only_java", platform: :jruby
       G
+
+      checksums = checksums_section_when_enabled do |c|
+        c.checksum gem_repo1, "only_java", "1.1", "java"
+      end
 
       bundle "lock --add-platform java"
       bundle :check, env: { "DEBUG" => "1" }
@@ -167,7 +164,7 @@ RSpec.describe Bundler::Definition do
       expect(out).to match(/using resolution from the lockfile/)
       expect(lockfile).to eq <<~G
         GEM
-          remote: #{file_uri_for(gem_repo1)}/
+          remote: https://gem.repo1/
           specs:
             only_java (1.1-java)
 
@@ -183,12 +180,12 @@ RSpec.describe Bundler::Definition do
     end
 
     it "for a rubygems gem" do
-      checksums = checksums_section_when_existing do |c|
+      checksums = checksums_section_when_enabled do |c|
         c.checksum gem_repo1, "foo", "1.0"
       end
 
       install_gemfile <<-G
-        source "#{file_uri_for(gem_repo1)}"
+        source "https://gem.repo1"
         gem "foo"
       G
 
@@ -197,7 +194,7 @@ RSpec.describe Bundler::Definition do
       expect(out).to match(/using resolution from the lockfile/)
       expect(lockfile).to eq <<~G
         GEM
-          remote: #{file_uri_for(gem_repo1)}/
+          remote: https://gem.repo1/
           specs:
             foo (1.0)
 
@@ -218,13 +215,13 @@ RSpec.describe Bundler::Definition do
       context "eager unlock" do
         let(:source_list) do
           Bundler::SourceList.new.tap do |source_list|
-            source_list.add_global_rubygems_remote(file_uri_for(gem_repo4))
+            source_list.add_global_rubygems_remote("https://gem.repo4")
           end
         end
 
         before do
           gemfile <<-G
-            source "#{file_uri_for(gem_repo4)}"
+            source "https://gem.repo4"
             gem 'isolated_owner'
 
             gem 'shared_owner_a'
@@ -233,7 +230,7 @@ RSpec.describe Bundler::Definition do
 
           lockfile <<-L
             GEM
-              remote: #{file_uri_for(gem_repo4)}
+              remote: https://gem.repo4
               specs:
                 isolated_dep (2.0.1)
                 isolated_owner (1.0.1)

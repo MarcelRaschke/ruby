@@ -88,6 +88,9 @@ static const char casetable[] = {
 # error >>> "You lose. You will need a translation table for your character set." <<<
 #endif
 
+// The process-global timeout for regexp matching
+rb_hrtime_t rb_reg_match_time_limit = 0;
+
 int
 rb_memcicmp(const void *x, const void *y, long len)
 {
@@ -958,7 +961,7 @@ make_regexp(const char *s, long len, rb_encoding *enc, int flags, onig_errmsg_bu
  *  * <code>$'</code> is Regexp.last_match<code>.post_match</code>;
  *  * <code>$+</code> is Regexp.last_match<code>[ -1 ]</code> (the last capture).
  *
- *  See also "Special global variables" section in Regexp documentation.
+ *  See also Regexp@Global+Variables.
  */
 
 VALUE rb_cMatch;
@@ -1295,6 +1298,54 @@ match_byteoffset(VALUE match, VALUE n)
 
 /*
  *  call-seq:
+ *    bytebegin(n) -> integer
+ *    bytebegin(name) -> integer
+ *
+ *  :include: doc/matchdata/bytebegin.rdoc
+ *
+ */
+
+static VALUE
+match_bytebegin(VALUE match, VALUE n)
+{
+    int i = match_backref_number(match, n);
+    struct re_registers *regs = RMATCH_REGS(match);
+
+    match_check(match);
+    backref_number_check(regs, i);
+
+    if (BEG(i) < 0)
+        return Qnil;
+    return LONG2NUM(BEG(i));
+}
+
+
+/*
+ *  call-seq:
+ *    byteend(n) -> integer
+ *    byteend(name) -> integer
+ *
+ *  :include: doc/matchdata/byteend.rdoc
+ *
+ */
+
+static VALUE
+match_byteend(VALUE match, VALUE n)
+{
+    int i = match_backref_number(match, n);
+    struct re_registers *regs = RMATCH_REGS(match);
+
+    match_check(match);
+    backref_number_check(regs, i);
+
+    if (BEG(i) < 0)
+        return Qnil;
+    return LONG2NUM(END(i));
+}
+
+
+/*
+ *  call-seq:
  *    begin(n) -> integer
  *    begin(name) -> integer
  *
@@ -1527,8 +1578,8 @@ reg_enc_error(VALUE re, VALUE str)
 {
     rb_raise(rb_eEncCompatError,
              "incompatible encoding regexp match (%s regexp with %s string)",
-             rb_enc_name(rb_enc_get(re)),
-             rb_enc_name(rb_enc_get(str)));
+             rb_enc_inspect_name(rb_enc_get(re)),
+             rb_enc_inspect_name(rb_enc_get(str)));
 }
 
 static inline int
@@ -1668,10 +1719,16 @@ rb_reg_onig_match(VALUE re, VALUE str,
     if (result < 0) {
         onig_region_free(regs, 0);
 
-        if (result != ONIG_MISMATCH) {
+        switch (result) {
+          case ONIG_MISMATCH:
+            break;
+          case ONIGERR_TIMEOUT:
+            rb_raise(rb_eRegexpTimeoutError, "regexp match timeout");
+          default: {
             onig_errmsg_buffer err = "";
             onig_error_code_to_str((UChar*)err, (int)result);
             rb_reg_raise(err, re);
+          }
         }
     }
 
@@ -1746,10 +1803,10 @@ rb_reg_search_set_match(VALUE re, VALUE str, long pos, int reverse, int set_back
         .pos = pos,
         .range = reverse ? 0 : len,
     };
-
     struct re_registers regs = {0};
 
     OnigPosition result = rb_reg_onig_match(re, str, reg_onig_search, &args, &regs);
+
     if (result == ONIG_MISMATCH) {
         rb_backref_set(Qnil);
         return ONIG_MISMATCH;
@@ -3596,7 +3653,7 @@ reg_match_pos(VALUE re, VALUE *strp, long pos, VALUE* set_match)
  *  if and only if +self+:
  *
  *  - Is a regexp literal;
- *    see {Regexp Literals}[rdoc-ref:literals.rdoc@Regexp+Literals].
+ *    see {Regexp Literals}[rdoc-ref:syntax/literals.rdoc@Regexp+Literals].
  *  - Does not contain interpolations;
  *    see {Regexp interpolation}[rdoc-ref:Regexp@Interpolation+Mode].
  *  - Is at the left of the expression.
@@ -4550,7 +4607,7 @@ match_setter(VALUE val, ID _x, VALUE *_y)
  *    Regexp.last_match(n) -> string or nil
  *    Regexp.last_match(name) -> string or nil
  *
- *  With no argument, returns the value of <tt>$!</tt>,
+ *  With no argument, returns the value of <tt>$~</tt>,
  *  which is the result of the most recent pattern match
  *  (see {Regexp global variables}[rdoc-ref:Regexp@Global+Variables]):
  *
@@ -4601,12 +4658,9 @@ re_warn(const char *s)
     rb_warn("%s", s);
 }
 
-// The process-global timeout for regexp matching
-rb_hrtime_t rb_reg_match_time_limit = 0;
-
 // This function is periodically called during regexp matching
-void
-rb_reg_check_timeout(regex_t *reg, void *end_time_)
+bool
+rb_reg_timeout_p(regex_t *reg, void *end_time_)
 {
     rb_hrtime_t *end_time = (rb_hrtime_t *)end_time_;
 
@@ -4631,10 +4685,12 @@ rb_reg_check_timeout(regex_t *reg, void *end_time_)
     }
     else {
         if (*end_time < rb_hrtime_now()) {
-            // timeout is exceeded
-            rb_raise(rb_eRegexpTimeoutError, "regexp match timeout");
+            // Timeout has exceeded
+            return true;
         }
     }
+
+    return false;
 }
 
 /*
@@ -4801,6 +4857,8 @@ Init_Regexp(void)
     rb_define_method(rb_cMatch, "length", match_size, 0);
     rb_define_method(rb_cMatch, "offset", match_offset, 1);
     rb_define_method(rb_cMatch, "byteoffset", match_byteoffset, 1);
+    rb_define_method(rb_cMatch, "bytebegin", match_bytebegin, 1);
+    rb_define_method(rb_cMatch, "byteend", match_byteend, 1);
     rb_define_method(rb_cMatch, "begin", match_begin, 1);
     rb_define_method(rb_cMatch, "end", match_end, 1);
     rb_define_method(rb_cMatch, "match", match_nth, 1);

@@ -1,4 +1,4 @@
-# frozen_string_literal: false
+# frozen_string_literal: true
 #
 #   irb/completion.rb -
 #   	by Keiju ISHITSUKA(keiju@ishitsuka.com)
@@ -32,6 +32,8 @@ module IRB
       when while
       yield
     ]
+
+    HELP_COMMAND_PREPOSING = /\Ahelp\s+/
 
     def completion_candidates(preposing, target, postposing, bind:)
       raise NotImplementedError
@@ -86,6 +88,14 @@ module IRB
         )
     end
 
+    def command_candidates(target)
+      if !target.empty?
+        IRB::Command.command_names.select { _1.start_with?(target) }
+      else
+        []
+      end
+    end
+
     def retrieve_files_to_require_relative_from_current_dir
       @files_from_current_dir ||= Dir.glob("**/*.{rb,#{RbConfig::CONFIG['DLEXT']}}", base: '.').map { |path|
         path.sub(/\.(rb|#{RbConfig::CONFIG['DLEXT']})\z/, '')
@@ -103,9 +113,21 @@ module IRB
     end
 
     def completion_candidates(preposing, target, _postposing, bind:)
+      # When completing the argument of `help` command, only commands should be candidates
+      return command_candidates(target) if preposing.match?(HELP_COMMAND_PREPOSING)
+
+      commands = if preposing.empty?
+        command_candidates(target)
+      # It doesn't make sense to propose commands with other preposing
+      else
+        []
+      end
+
       result = ReplTypeCompletor.analyze(preposing + target, binding: bind, filename: @context.irb_path)
-      return [] unless result
-      result.completion_candidates.map { target + _1 }
+
+      return commands unless result
+
+      commands | result.completion_candidates.map { target + _1 }
     end
 
     def doc_namespace(preposing, matched, _postposing, bind:)
@@ -115,26 +137,33 @@ module IRB
   end
 
   class RegexpCompletor < BaseCompletor # :nodoc:
+    KERNEL_METHODS = ::Kernel.instance_method(:methods)
+    KERNEL_PRIVATE_METHODS = ::Kernel.instance_method(:private_methods)
+    KERNEL_INSTANCE_VARIABLES = ::Kernel.instance_method(:instance_variables)
+    OBJECT_CLASS_INSTANCE_METHOD = ::Object.instance_method(:class)
+    MODULE_CONSTANTS_INSTANCE_METHOD = ::Module.instance_method(:constants)
+
     using Module.new {
       refine ::Binding do
         def eval_methods
-          ::Kernel.instance_method(:methods).bind(eval("self")).call
+          KERNEL_METHODS.bind_call(receiver)
         end
 
         def eval_private_methods
-          ::Kernel.instance_method(:private_methods).bind(eval("self")).call
+          KERNEL_PRIVATE_METHODS.bind_call(receiver)
         end
 
         def eval_instance_variables
-          ::Kernel.instance_method(:instance_variables).bind(eval("self")).call
+          KERNEL_INSTANCE_VARIABLES.bind_call(receiver)
         end
 
         def eval_global_variables
-          ::Kernel.instance_method(:global_variables).bind(eval("self")).call
+          ::Kernel.global_variables
         end
 
         def eval_class_constants
-          ::Module.instance_method(:constants).bind(eval("self.class")).call
+          klass = OBJECT_CLASS_INSTANCE_METHOD.bind_call(receiver)
+          MODULE_CONSTANTS_INSTANCE_METHOD.bind_call(klass)
         end
       end
     }
@@ -177,11 +206,20 @@ module IRB
     end
 
     def completion_candidates(preposing, target, postposing, bind:)
-      if preposing && postposing
-        result = complete_require_path(target, preposing, postposing)
-        return result if result
+      if result = complete_require_path(target, preposing, postposing)
+        return result
       end
-      retrieve_completion_data(target, bind: bind, doc_namespace: false).compact.map{ |i| i.encode(Encoding.default_external) }
+
+      commands = command_candidates(target)
+
+      # When completing the argument of `help` command, only commands should be candidates
+      return commands if preposing.match?(HELP_COMMAND_PREPOSING)
+
+      # It doesn't make sense to propose commands with other preposing
+      commands = [] unless preposing.empty?
+
+      completion_data = retrieve_completion_data(target, bind: bind, doc_namespace: false).compact.map{ |i| i.encode(Encoding.default_external) }
+      commands | completion_data
     end
 
     def doc_namespace(_preposing, matched, _postposing, bind:)
@@ -388,7 +426,7 @@ module IRB
 
         if doc_namespace
           rec_class = rec.is_a?(Module) ? rec : rec.class
-          "#{rec_class.name}#{sep}#{candidates.find{ |i| i == message }}"
+          "#{rec_class.name}#{sep}#{candidates.find{ |i| i == message }}" rescue nil
         else
           select_message(receiver, message, candidates, sep)
         end
@@ -418,7 +456,7 @@ module IRB
           vars = (bind.local_variables | bind.eval_instance_variables).collect{|m| m.to_s}
           perfect_match_var = vars.find{|m| m.to_s == input}
           if perfect_match_var
-            eval("#{perfect_match_var}.class.name", bind)
+            eval("#{perfect_match_var}.class.name", bind) rescue nil
           else
             candidates = (bind.eval_methods | bind.eval_private_methods | bind.local_variables | bind.eval_instance_variables | bind.eval_class_constants).collect{|m| m.to_s}
             candidates |= ReservedWords
@@ -459,7 +497,7 @@ module IRB
       end
     end
     CompletionProc = ->(target, preposing = nil, postposing = nil) {
-      regexp_completor.completion_candidates(preposing, target, postposing, bind: IRB.conf[:MAIN_CONTEXT].workspace.binding)
+      regexp_completor.completion_candidates(preposing || '', target, postposing || '', bind: IRB.conf[:MAIN_CONTEXT].workspace.binding)
     }
   end
   deprecate_constant :InputCompletor

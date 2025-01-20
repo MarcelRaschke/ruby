@@ -45,6 +45,7 @@ class Gem::SpecificationPolicy
 
   def validate(strict = false)
     validate_required!
+    validate_required_metadata!
 
     validate_optional(strict) if packaging || strict
 
@@ -85,13 +86,15 @@ class Gem::SpecificationPolicy
 
     validate_authors_field
 
-    validate_metadata
-
     validate_licenses_length
 
-    validate_lazy_metadata
-
     validate_duplicate_dependencies
+  end
+
+  def validate_required_metadata!
+    validate_metadata
+
+    validate_lazy_metadata
   end
 
   def validate_optional(strict)
@@ -102,6 +105,8 @@ class Gem::SpecificationPolicy
     validate_values
 
     validate_dependencies
+
+    validate_required_ruby_version
 
     validate_extensions
 
@@ -116,6 +121,13 @@ class Gem::SpecificationPolicy
         alert_warning help_text
       end
     end
+  end
+
+  ##
+  # Implementation for Specification#validate_for_resolution
+
+  def validate_for_resolution
+    validate_required!
   end
 
   ##
@@ -227,6 +239,12 @@ duplicate dependency on #{dep}, (#{prev.requirement}) use:
     end
   end
 
+  def validate_required_ruby_version
+    if @specification.required_ruby_version.requirements == [Gem::Requirement::DefaultRequirement]
+      warning "make sure you specify the oldest ruby version constraint (like \">= 3.0\") that you want your gem to support by setting the `required_ruby_version` gemspec attribute"
+    end
+  end
+
   ##
   # Issues a warning for each file to be packaged which is world-readable.
   #
@@ -266,7 +284,9 @@ duplicate dependency on #{dep}, (#{prev.requirement}) use:
 
     return if rubygems_version == Gem::VERSION
 
-    error "expected RubyGems version #{Gem::VERSION}, was #{rubygems_version}"
+    warning "expected RubyGems version #{Gem::VERSION}, was #{rubygems_version}"
+
+    @specification.rubygems_version = Gem::VERSION
   end
 
   def validate_required_attributes
@@ -287,7 +307,7 @@ duplicate dependency on #{dep}, (#{prev.requirement}) use:
     elsif !VALID_NAME_PATTERN.match?(name)
       error "invalid value for attribute name: #{name.dump} can only include letters, numbers, dashes, and underscores"
     elsif SPECIAL_CHARACTERS.match?(name)
-      error "invalid value for attribute name: #{name.dump} can not begin with a period, dash, or underscore"
+      error "invalid value for attribute name: #{name.dump} cannot begin with a period, dash, or underscore"
     end
   end
 
@@ -427,13 +447,13 @@ or set it to nil if you don't want to specify a license.
 
     # Make sure a homepage is valid HTTP/HTTPS URI
     if homepage && !homepage.empty?
-      require "uri"
+      require_relative "vendor/uri/lib/uri"
       begin
-        homepage_uri = URI.parse(homepage)
-        unless [URI::HTTP, URI::HTTPS].member? homepage_uri.class
+        homepage_uri = Gem::URI.parse(homepage)
+        unless [Gem::URI::HTTP, Gem::URI::HTTPS].member? homepage_uri.class
           error "\"#{homepage}\" is not a valid HTTP URI"
         end
-      rescue URI::InvalidURIError
+      rescue Gem::URI::InvalidURIError
         error "\"#{homepage}\" is not a valid HTTP URI"
       end
     end
@@ -497,10 +517,10 @@ You have specified rust based extension, but Cargo.lock is not part of the gem f
 
   def validate_rake_extensions(builder) # :nodoc:
     rake_extension = @specification.extensions.any? {|s| builder.builder_for(s) == Gem::Ext::RakeBuilder }
-    rake_dependency = @specification.dependencies.any? {|d| d.name == "rake" }
+    rake_dependency = @specification.dependencies.any? {|d| d.name == "rake" && d.type == :runtime }
 
     warning <<-WARNING if rake_extension && !rake_dependency
-You have specified rake based extension, but rake is not added as dependency. It is recommended to add rake as a dependency in gemspec since there's no guarantee rake will be already installed.
+You have specified rake based extension, but rake is not added as runtime dependency. It is recommended to add rake as a runtime dependency in gemspec since there's no guarantee rake will be already installed.
     WARNING
   end
 

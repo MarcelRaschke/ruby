@@ -23,10 +23,7 @@ module Bundler
     # @param [Pathname] lockfile_path The lockfile in which to inject the new dependency.
     # @return [Array]
     def inject(gemfile_path, lockfile_path)
-      if Bundler.frozen_bundle?
-        # ensure the lock and Gemfile are synced
-        Bundler.definition.ensure_equivalent_gemfile_and_lockfile(true)
-      end
+      Bundler.definition.ensure_equivalent_gemfile_and_lockfile(true)
 
       # temporarily unfreeze
       Bundler.settings.temporary(deployment: false, frozen: false) do
@@ -44,13 +41,13 @@ module Bundler
 
         # resolve to see if the new deps broke anything
         @definition = builder.to_definition(lockfile_path, {})
-        @definition.resolve_remotely!
+        @definition.remotely!
 
         # since nothing broke, we can add those gems to the gemfile
         append_to(gemfile_path, build_gem_lines(@options[:conservative_versioning])) if @deps.any?
 
         # since we resolved successfully, write out the lockfile
-        @definition.lock(Bundler.default_lockfile)
+        @definition.lock
 
         # invalidate the cached Bundler.definition
         Bundler.reset_paths!
@@ -120,9 +117,10 @@ module Bundler
         github = ", :github => \"#{d.github}\"" unless d.github.nil?
         branch = ", :branch => \"#{d.branch}\"" unless d.branch.nil?
         ref = ", :ref => \"#{d.ref}\"" unless d.ref.nil?
+        glob = ", :glob => \"#{d.glob}\"" unless d.glob.nil?
         require_path = ", :require => #{convert_autorequire(d.autorequire)}" unless d.autorequire.nil?
 
-        %(gem #{name}#{requirement}#{group}#{source}#{path}#{git}#{github}#{branch}#{ref}#{require_path})
+        %(gem #{name}#{requirement}#{group}#{source}#{path}#{git}#{github}#{branch}#{ref}#{glob}#{require_path})
       end.join("\n")
     end
 
@@ -186,7 +184,7 @@ module Bundler
     # @param [Array] gems            Array of names of gems to be removed.
     # @param [Pathname] gemfile_path The Gemfile from which to remove dependencies.
     def remove_gems_from_gemfile(gems, gemfile_path)
-      patterns = /gem\s+(['"])#{Regexp.union(gems)}\1|gem\s*\((['"])#{Regexp.union(gems)}\2\)/
+      patterns = /gem\s+(['"])#{Regexp.union(gems)}\1|gem\s*\((['"])#{Regexp.union(gems)}\2.*\)/
       new_gemfile = []
       multiline_removal = false
       File.readlines(gemfile_path).each do |line|

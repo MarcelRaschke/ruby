@@ -57,7 +57,7 @@ class Gem::Commands::PristineCommand < Gem::Command
     end
 
     add_option("-i", "--install-dir DIR",
-               "Gem repository to get binstubs and plugins installed") do |value, options|
+               "Gem repository to get gems restored") do |value, options|
       options[:install_dir] = File.expand_path(value)
     end
 
@@ -103,22 +103,26 @@ extensions will be restored.
   end
 
   def execute
+    install_dir = options[:install_dir]
+
+    specification_record = install_dir ? Gem::SpecificationRecord.from_path(install_dir) : Gem::Specification.specification_record
+
     specs = if options[:all]
-      Gem::Specification.map
+      specification_record.map
 
     # `--extensions` must be explicitly given to pristine only gems
     # with extensions.
     elsif options[:extensions_set] &&
           options[:extensions] && options[:args].empty?
-      Gem::Specification.select do |spec|
+      specification_record.select do |spec|
         spec.extensions && !spec.extensions.empty?
       end
     elsif options[:only_missing_extensions]
-      Gem::Specification.select(&:missing_extensions?)
+      specification_record.select(&:missing_extensions?)
     else
-      get_all_gem_names.sort.map do |gem_name|
-        Gem::Specification.find_all_by_name(gem_name, options[:version]).reverse
-      end.flatten
+      get_all_gem_names.sort.flat_map do |gem_name|
+        specification_record.find_all_by_name(gem_name, options[:version]).reverse
+      end
     end
 
     specs = specs.select {|spec| spec.platform == RUBY_ENGINE || Gem::Platform.local === spec.platform || spec.platform == Gem::Platform::RUBY }
@@ -130,10 +134,14 @@ extensions will be restored.
 
     say "Restoring gems to pristine condition..."
 
-    specs.each do |spec|
-      if spec.default_gem?
-        say "Skipped #{spec.full_name}, it is a default gem"
-        next
+    specs.group_by(&:full_name_with_location).values.each do |grouped_specs|
+      spec = grouped_specs.find {|s| !s.default_gem? } || grouped_specs.first
+
+      unless only_executables_or_plugins?
+        # Default gemspecs include changes provided by ruby-core installer that
+        # can't currently be pristined (inclusion of compiled extension targets in
+        # the file list). So stick to resetting executables if it's a default gem.
+        options[:only_executables] = true if spec.default_gem?
       end
 
       if options.key? :skip
@@ -143,17 +151,17 @@ extensions will be restored.
         end
       end
 
-      unless spec.extensions.empty? || options[:extensions] || options[:only_executables] || options[:only_plugins]
-        say "Skipped #{spec.full_name}, it needs to compile an extension"
+      unless spec.extensions.empty? || options[:extensions] || only_executables_or_plugins?
+        say "Skipped #{spec.full_name_with_location}, it needs to compile an extension"
         next
       end
 
       gem = spec.cache_file
 
-      unless File.exist?(gem) || options[:only_executables] || options[:only_plugins]
+      unless File.exist?(gem) || only_executables_or_plugins?
         require_relative "../remote_fetcher"
 
-        say "Cached gem for #{spec.full_name} not found, attempting to fetch..."
+        say "Cached gem for #{spec.full_name_with_location} not found, attempting to fetch..."
 
         dep = Gem::Dependency.new spec.name, spec.version
         found, _ = Gem::SpecFetcher.fetcher.spec_for_dependency dep
@@ -176,7 +184,6 @@ extensions will be restored.
         end
 
       bin_dir = options[:bin_dir] if options[:bin_dir]
-      install_dir = options[:install_dir] if options[:install_dir]
 
       installer_options = {
         wrappers: true,
@@ -198,7 +205,13 @@ extensions will be restored.
         installer.install
       end
 
-      say "Restored #{spec.full_name}"
+      say "Restored #{spec.full_name_with_location}"
     end
+  end
+
+  private
+
+  def only_executables_or_plugins?
+    options[:only_executables] || options[:only_plugins]
   end
 end

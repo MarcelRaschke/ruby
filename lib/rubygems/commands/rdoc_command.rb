@@ -64,9 +64,9 @@ Use --overwrite to force rebuilding of documentation.
     specs = if options[:all]
       Gem::Specification.to_a
     else
-      get_all_gem_names.map do |name|
+      get_all_gem_names.flat_map do |name|
         Gem::Specification.find_by_name name, options[:version]
-      end.flatten.uniq
+      end.uniq
     end
 
     if specs.empty?
@@ -84,14 +84,7 @@ Use --overwrite to force rebuilding of documentation.
         FileUtils.rm_rf File.join(spec.doc_dir, "rdoc")
       end
 
-      begin
-        doc.generate
-      rescue Errno::ENOENT => e
-        match = e.message.include?(" - ")
-        alert_error "Unable to document #{spec.full_name}, " \
-                    " #{match.post_match} is missing, skipping"
-        terminate_interaction 1 if specs.length == 1
-      end
+      doc.generate
     end
   end
 end

@@ -41,7 +41,7 @@ module Bundler
     HASH_REGEX = /
       ^
       ([ ]*) # indentations
-      (.+) # key
+      ([^#]+) # key excludes comment char '#'
       (?::(?=(?:\s|$))) # :  (without the lookahead the #key includes this when : is present in value)
       [ ]?
       (['"]?) # optional opening quote
@@ -58,7 +58,8 @@ module Bundler
       str.split(/\r?\n/) do |line|
         if match = HASH_REGEX.match(line)
           indent, key, quote, val = match.captures
-          convert_to_backward_compatible_key!(key)
+          val = strip_comment(val)
+
           depth = indent.size / 2
           if quote.empty? && val.empty?
             new_hash = {}
@@ -72,6 +73,8 @@ module Bundler
           end
         elsif match = ARRAY_REGEX.match(line)
           _, val = match.captures
+          val = strip_comment(val)
+
           last_hash[last_empty_key] = [] unless last_hash[last_empty_key].is_a?(Array)
 
           last_hash[last_empty_key].push(val)
@@ -80,14 +83,16 @@ module Bundler
       res
     end
 
-    # for settings' keys
-    def convert_to_backward_compatible_key!(key)
-      key << "/" if /https?:/i.match?(key) && !%r{/\Z}.match?(key)
-      key.gsub!(".", "__")
+    def strip_comment(val)
+      if val.include?("#") && !val.start_with?("#")
+        val.split("#", 2).first.strip
+      else
+        val
+      end
     end
 
     class << self
-      private :dump_hash, :convert_to_backward_compatible_key!
+      private :dump_hash
     end
   end
 end

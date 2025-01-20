@@ -522,7 +522,7 @@ module Test
       # Skips the current test. Gets listed at the end of the run but
       # doesn't cause a failure exit code.
 
-      def pend msg = nil, bt = caller
+      def pend msg = nil, bt = caller, &_
         msg ||= "Skipped, no message given"
         @skip = true
         raise Test::Unit::PendedError, msg, bt
@@ -768,7 +768,14 @@ EOT
           e = assert_raise(SyntaxError, mesg) do
             syntax_check(src, fname, line)
           end
-          assert_match(error, e.message, mesg)
+
+          # Prism adds ANSI escape sequences to syntax error messages to
+          # colorize and format them. We strip them out here to make them easier
+          # to match against in tests.
+          message = e.message
+          message.gsub!(/\e\[.*?m/, "")
+
+          assert_match(error, message, mesg)
           e
         end
       end
@@ -791,33 +798,37 @@ EOT
       MIN_MEASURABLE = 1.0 / MIN_HZ
 
       def assert_cpu_usage_low(msg = nil, pct: 0.05, wait: 1.0, stop: nil)
-        require 'benchmark'
-
         wait = EnvUtil.apply_timeout_scale(wait)
         if wait < 0.1 # TIME_QUANTUM_USEC in thread_pthread.c
           warn "test #{msg || 'assert_cpu_usage_low'} too short to be accurate"
         end
-        tms = Benchmark.measure(msg || '') do
-          if stop
-            th = Thread.start {sleep wait; stop.call}
-            yield
-            th.join
-          else
-            begin
-              Timeout.timeout(wait) {yield}
-            rescue Timeout::Error
-            end
+
+        t0, r0 = Process.times, Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+        if stop
+          th = Thread.start {sleep wait; stop.call}
+          yield
+          th.join
+        else
+          begin
+            Timeout.timeout(wait) {yield}
+          rescue Timeout::Error
           end
         end
 
-        max = pct * tms.real
+        t1, r1 = Process.times, Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+        total = t1.utime - t0.utime + t1.stime - t0.stime + t1.cutime - t0.cutime + t1.cstime - t0.cstime
+        real = r1 - r0
+
+        max = pct * real
         min_measurable = MIN_MEASURABLE
         min_measurable *= 1.30 # add a little (30%) to account for misc. overheads
         if max < min_measurable
           max = min_measurable
         end
 
-        assert_operator tms.total, :<=, max, msg
+        assert_operator total, :<=, max, msg
       end
 
       def assert_is_minus_zero(f)

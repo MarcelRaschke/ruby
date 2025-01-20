@@ -2,6 +2,20 @@
 
 `foo #{bar} baz`
 
-`f\oo`
-
 `foo`
+
+%x{
+  foo
+}
+
+``
+
+%x{}
+
+`
+foo\
+b\nar
+`
+
+`
+’`

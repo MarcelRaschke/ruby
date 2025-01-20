@@ -397,7 +397,7 @@ nucomp_s_new_internal(VALUE klass, VALUE real, VALUE imag)
 
     RCOMPLEX_SET_REAL(obj, real);
     RCOMPLEX_SET_IMAG(obj, imag);
-    OBJ_FREEZE_RAW((VALUE)obj);
+    OBJ_FREEZE((VALUE)obj);
 
     return (VALUE)obj;
 }
@@ -411,15 +411,15 @@ nucomp_s_alloc(VALUE klass)
 inline static VALUE
 f_complex_new_bang1(VALUE klass, VALUE x)
 {
-    assert(!RB_TYPE_P(x, T_COMPLEX));
+    RUBY_ASSERT(!RB_TYPE_P(x, T_COMPLEX));
     return nucomp_s_new_internal(klass, x, ZERO);
 }
 
 inline static VALUE
 f_complex_new_bang2(VALUE klass, VALUE x, VALUE y)
 {
-    assert(!RB_TYPE_P(x, T_COMPLEX));
-    assert(!RB_TYPE_P(y, T_COMPLEX));
+    RUBY_ASSERT(!RB_TYPE_P(x, T_COMPLEX));
+    RUBY_ASSERT(!RB_TYPE_P(y, T_COMPLEX));
     return nucomp_s_new_internal(klass, x, y);
 }
 
@@ -432,7 +432,7 @@ nucomp_real_check(VALUE num)
         !RB_TYPE_P(num, T_RATIONAL)) {
         if (RB_TYPE_P(num, T_COMPLEX) && nucomp_real_p(num)) {
             VALUE real = RCOMPLEX(num)->real;
-            assert(!RB_TYPE_P(real, T_COMPLEX));
+            RUBY_ASSERT(!RB_TYPE_P(real, T_COMPLEX));
             return real;
         }
         if (!k_numeric_p(num) || !f_real_p(num))
@@ -1065,9 +1065,11 @@ complex_pow_for_special_angle(VALUE self, VALUE other)
     else if (f_eqeq_p(dat->real, f_negate(dat->imag))) {
         x = dat->imag;
         dir = 3;
+    } else {
+        dir = 0;
     }
 
-    if (x == Qundef) return x;
+    if (UNDEF_P(x)) return x;
 
     if (f_negative_p(x)) {
         x = f_negate(x);
@@ -1139,7 +1141,7 @@ rb_complex_pow(VALUE self, VALUE other)
     }
 
     VALUE result = complex_pow_for_special_angle(self, other);
-    if (result != Qundef) return result;
+    if (!UNDEF_P(result)) return result;
 
     if (RB_TYPE_P(other, T_COMPLEX)) {
         VALUE r, theta, nr, ntheta;
@@ -1591,16 +1593,15 @@ f_tpositive_p(VALUE x)
 }
 
 static VALUE
-f_format(VALUE self, VALUE (*func)(VALUE))
+f_format(VALUE self, VALUE s, VALUE (*func)(VALUE))
 {
-    VALUE s;
     int impos;
 
     get_dat1(self);
 
     impos = f_tpositive_p(dat->imag);
 
-    s = (*func)(dat->real);
+    rb_str_concat(s, (*func)(dat->real));
     rb_str_cat2(s, !impos ? "-" : "+");
 
     rb_str_concat(s, (*func)(f_abs(dat->imag)));
@@ -1627,7 +1628,7 @@ f_format(VALUE self, VALUE (*func)(VALUE))
 static VALUE
 nucomp_to_s(VALUE self)
 {
-    return f_format(self, rb_String);
+    return f_format(self, rb_usascii_str_new2(""), rb_String);
 }
 
 /*
@@ -1649,7 +1650,7 @@ nucomp_inspect(VALUE self)
     VALUE s;
 
     s = rb_usascii_str_new2("(");
-    rb_str_concat(s, f_format(self, rb_inspect));
+    f_format(self, s, rb_inspect);
     rb_str_cat2(s, ")");
 
     return s;
@@ -1715,7 +1716,7 @@ nucomp_loader(VALUE self, VALUE a)
 
     RCOMPLEX_SET_REAL(dat, rb_ivar_get(a, id_i_real));
     RCOMPLEX_SET_IMAG(dat, rb_ivar_get(a, id_i_imag));
-    OBJ_FREEZE_RAW(self);
+    OBJ_FREEZE(self);
 
     return self;
 }
@@ -1839,9 +1840,11 @@ nucomp_to_f(VALUE self)
  *
  *   Complex.rect(1, 0).to_r              # => (1/1)
  *   Complex.rect(1, Rational(0, 1)).to_r # => (1/1)
+ *   Complex.rect(1, 0.0).to_r            # => (1/1)
  *
  * Raises RangeError if <tt>self.imag</tt> is not exactly zero
- * (either <tt>Integer(0)</tt> or <tt>Rational(0, _n_)</tt>).
+ * (either <tt>Integer(0)</tt> or <tt>Rational(0, _n_)</tt>)
+ * and <tt>self.imag.to_r</tt> is not exactly zero.
  *
  * Related: Complex#rationalize.
  */
@@ -1850,9 +1853,15 @@ nucomp_to_r(VALUE self)
 {
     get_dat1(self);
 
-    if (!k_exact_zero_p(dat->imag)) {
-        rb_raise(rb_eRangeError, "can't convert %"PRIsVALUE" into Rational",
-                 self);
+    if (RB_FLOAT_TYPE_P(dat->imag) && FLOAT_ZERO_P(dat->imag)) {
+        /* Do nothing here */
+    }
+    else if (!k_exact_zero_p(dat->imag)) {
+        VALUE imag = rb_check_convert_type_with_id(dat->imag, T_RATIONAL, "Rational", idTo_r);
+        if (NIL_P(imag) || !k_exact_zero_p(imag)) {
+            rb_raise(rb_eRangeError, "can't convert %"PRIsVALUE" into Rational",
+                     self);
+        }
     }
     return f_to_r(dat->real);
 }
@@ -2321,8 +2330,11 @@ nucomp_convert(VALUE klass, VALUE a1, VALUE a2, int raise)
             return a1;
         /* should raise exception for consistency */
         if (!k_numeric_p(a1)) {
-            if (!raise)
-                return rb_protect(to_complex, a1, NULL);
+            if (!raise) {
+                a1 = rb_protect(to_complex, a1, NULL);
+                rb_set_errinfo(Qnil);
+                return a1;
+            }
             return to_complex(a1);
         }
     }
@@ -2457,14 +2469,14 @@ float_arg(VALUE self)
  *
  * The rectangular coordinates of a complex number
  * are called the _real_ and _imaginary_ parts;
- * see {Complex number definition}[https://en.wikipedia.org/wiki/Complex_number#Definition].
+ * see {Complex number definition}[https://en.wikipedia.org/wiki/Complex_number#Definition_and_basic_operations].
  *
  * You can create a \Complex object from rectangular coordinates with:
  *
- * - A {complex literal}[rdoc-ref:doc/syntax/literals.rdoc@Complex+Literals].
- * - \Method Complex.rect.
- * - \Method Kernel#Complex, either with numeric arguments or with certain string arguments.
- * - \Method String#to_c, for certain strings.
+ * - A {complex literal}[rdoc-ref:syntax/literals.rdoc@Complex+Literals].
+ * - Method Complex.rect.
+ * - Method Kernel#Complex, either with numeric arguments or with certain string arguments.
+ * - Method String#to_c, for certain strings.
  *
  * Note that each of the stored parts may be a an instance one of the classes
  * Complex, Float, Integer, or Rational;
@@ -2482,7 +2494,7 @@ float_arg(VALUE self)
  *
  * The polar coordinates of a complex number
  * are called the _absolute_ and _argument_ parts;
- * see {Complex polar plane}[https://en.wikipedia.org/wiki/Complex_number#Polar_complex_plane].
+ * see {Complex polar plane}[https://en.wikipedia.org/wiki/Complex_number#Polar_form].
  *
  * In this class, the argument part
  * in expressed {radians}[https://en.wikipedia.org/wiki/Radian]
@@ -2490,9 +2502,9 @@ float_arg(VALUE self)
  *
  * You can create a \Complex object from polar coordinates with:
  *
- * - \Method Complex.polar.
- * - \Method Kernel#Complex, with certain string arguments.
- * - \Method String#to_c, for certain strings.
+ * - Method Complex.polar.
+ * - Method Kernel#Complex, with certain string arguments.
+ * - Method String#to_c, for certain strings.
  *
  * Note that each of the stored parts may be a an instance one of the classes
  * Complex, Float, Integer, or Rational;
@@ -2510,7 +2522,7 @@ float_arg(VALUE self)
  *
  * First, what's elsewhere:
  *
- * - \Class \Complex inherits (directly or indirectly)
+ * - Class \Complex inherits (directly or indirectly)
  *   from classes {Numeric}[rdoc-ref:Numeric@What-27s+Here]
  *   and {Object}[rdoc-ref:Object@What-27s+Here].
  * - Includes (indirectly) module {Comparable}[rdoc-ref:Comparable@What-27s+Here].
@@ -2576,7 +2588,7 @@ float_arg(VALUE self)
  * - #as_json: Returns a serialized hash constructed from +self+.
  * - #to_json: Returns a JSON string representing +self+.
  *
- * These methods are provided by the {JSON gem}[https://github.com/flori/json]. To make these methods available:
+ * These methods are provided by the {JSON gem}[https://github.com/ruby/json]. To make these methods available:
  *
  *   require 'json/add/complex'
  *
@@ -2710,7 +2722,7 @@ Init_Complex(void)
                     f_complex_new_bang2(rb_cComplex, ZERO, ONE));
 
 #if !USE_FLONUM
-    rb_gc_register_mark_object(RFLOAT_0 = DBL2NUM(0.0));
+    rb_vm_register_global_object(RFLOAT_0 = DBL2NUM(0.0));
 #endif
 
     rb_provide("complex.so");	/* for backward compatibility */
