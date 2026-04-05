@@ -113,9 +113,15 @@ class LeakChecker
       }
       unless fd_leaked.empty?
         unless @@try_lsof == false
-          open_list = IO.popen(%W[lsof -w -a -d #{fd_leaked.minmax.uniq.join("-")} -p #$$], &:readlines)
-          if @@try_lsof |= $?.success?
-            columns = (header = open_list.shift).split
+          begin
+            open_list = IO.popen(%W[lsof -w -a -d #{fd_leaked.minmax.uniq.join("-")} -p #$$], &:readlines)
+          rescue
+            @@try_lsof = false
+          else
+            @@try_lsof |= $?.success?
+          end
+          if header = open_list&.shift
+            columns = header.split
             fd_index, node_index = columns.index('FD'), columns.index('NODE')
             open_list.reject! do |of|
               of = of.chomp.split(' ', node_index + 2)
@@ -129,8 +135,8 @@ class LeakChecker
                 false
               end
             end
+            puts(header, open_list) unless open_list.empty?
           end
-          puts(header, open_list) unless open_list.empty?
         end
       end
       inspect.each {|fd, (str, pos)|
